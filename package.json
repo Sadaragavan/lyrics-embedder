@@ -1,0 +1,44 @@
+{
+  "name": "poweramp-lrc-embedder",
+  "productName": "Poweramp LRC Embedder",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Local desktop tool for scanning audio libraries, editing synced lyrics, and embedding Poweramp-compatible tags.",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test": "vitest run",
+    "build:unpack": "npm run typecheck && npm run build && electron-builder --dir --publish never",
+    "dist:win": "npm run typecheck && npm run build && electron-builder --win --publish never"
+  },
+  "dependencies": {
+    "taglib-wasm": "^2.5.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@tanstack/react-virtual": "^3.14.26",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "lucide-react": "^1.79.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4",
+    "vitest": "^5.1.0"
+  },
+  "allowScripts": {
+    "electron-winstaller": false
+  }
+}

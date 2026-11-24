@@ -1,0 +1,15 @@
+appId: com.local.poweramp-lrc-embedder
+productName: Poweramp LRC Embedder
+directories:
+  output: release
+files:
+  - out/**/*
+  - "!**/.*"
+asarUnpack:
+  - node_modules/taglib-wasm/**/*.wasm
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
