@@ -1,37 +1,33 @@
 # Active Handoff
 
-- Updated: 2026-11-25 19:27 IST
+- Updated: 2026-11-25 20:29 IST
 - Last agent: antigravity-builder
 - Branch: main
-- Base commit: ef6e22b
+- Base commit: 0150f45
 
 ## Current Goal
-Execute Phase 4: build the virtualized library table UI, `<audio>` preview player with `media://` range playback + unload handshake, LRC/stacked-layer editor, and Poweramp Android hardware spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav`.
+Run interactive Electron desktop verification and Poweramp Android hardware spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav` + `.lrc` outputs.
 
 ## Completed Since Last Handoff
-- Cleared Phase 2.5 blockers: `cleanupStaleTempFiles` in `src/main/tagger.ts` now retries transient lock errors and tolerates/skips `ENOENT` or persistent locks without aborting sweeps; `app.whenReady().then(...).catch(...)` in `src/main/index.ts` surfaces startup errors visibly (`console.error` + `dialog.showErrorBox`) and exits 1.
-- Added Phase 3 shared types (`src/shared/types.ts`) and pure LRC parser/normalizer (`src/shared/lrc.ts`) with `[offset:±ms]` baking, `[length:]` + header stripping, centisecond rounding, opt-in A2 word-tag preservation (default strip), stable sort, `stackLrcLayers`, and `shiftLrcOffset`.
-- Implemented `LrclibProvider` (`src/main/providers/lrclib.ts`, sequential `concurrency = 1`, ~400ms pacing, custom `User-Agent`, `/api/get` -> `/api/search` fallback, `429`/`503` `Retry-After` seconds/HTTP-date + jittered exponential backoff), `LocalSidecarProvider` + `importLrcFile` (`src/main/providers/localSidecar.ts`, UTF-8/BOM, `<= 1 MiB`, symlink rejection), and cancellable `LyricsFetchQueue` (`src/main/providers/queue.ts`).
-- Wired preload/IPC channels (`dialog:selectLrcFile`, `lyrics:fetch`, `lyrics:fetchBatch`, `lyrics:cancelFetch`, `lyrics:fetchProgress`, `lyrics:importFile`) with `trackId`, root containment / dialog authorization, and `ALLOWED_PROVIDER_IDS` validation (`src/shared/ipc.ts`, `src/preload/index.ts`, `src/main/index.ts`).
-- Added unit suites `tests/{lrc,lrclib,localSidecar,lyricsQueue}.test.ts` and temp-sweep lock test in `tests/tagger.test.ts`; updated `docs/PROGRESS.md`.
+- Part A Phase 3 fixes: `LrclibProvider` now throws on exhausted `429`/`503` or network errors (only falling back to `/api/search` on `404`/empty match) and records `lastRequestTime` in `finally`; `LyricsFetchQueue` emits `phase: 'error'` when providers fail without a match and short-circuits on `localSidecar` synced hits; `src/shared/lrc.ts` fixes `[offset:±ms]` polarity (`timeMs - offset`) without premature clamping before `shiftLrcOffset`; `src/main/index.ts` rejects symlinks in `selectLrcFile` and caps fetch query metadata fields at 512 chars.
+- Part B Phase 4 UI: added pure DOM-free `src/shared/{trackSelection,lyricsSync}.ts`, `src/renderer/src/types.ts`, `LibraryToolbar.tsx`, `TrackTable.tsx` (`@tanstack/react-virtual`, React-managed Shift/Ctrl selection), `AudioPreviewPlayer.tsx` (`media://track/<id>`, active-line display, click-to-seek, synchronous ref-backed `onUnloadAudio` unload before preload ack), `LyricsEditorPanel.tsx` (raw/stack layers, offset nudge, normalize, opt-in A2 toggle, LRCLIB/sidecar fetch + cancel, `.lrc` import, drafts, sequential embed), and split `h-screen` `App.tsx` layout keeping `app.css` `@source` directives intact.
+- Added `tests/{trackSelection,lyricsSync}.test.ts` and updated `tests/{lrc,lrclib,lyricsQueue}.test.ts` + `docs/PROGRESS.md`.
 
 ## Verification Status
 - `npm run typecheck`: PASS (0 errors)
-- `npm test`: PASS (138/138 tests across 9 files)
+- `npm test`: PASS (156/156 tests across 11 files)
 - `npm run build`: PASS
 - `npm run build:unpack` + `--smoke-test`: PASS (exit 0, `ready: true`, `2.5.1 (TagLib 2.3.2)`)
 
 ## Exact Next Step
-1. Build Phase 4 renderer shell (`src/renderer/src/App.tsx` and components): library root picker, scan progress, and `@tanstack/react-virtual` track table with React-managed Shift/Ctrl multi-selection.
-2. Add `<audio>` preview player wired to `media://track/<id>` via `getMediaUrl` and `onUnloadAudio` (`removeAttribute('src')` + `load()`) lock-release handshake before embedding.
-3. Build LRC editor panel using `src/shared/lrc.ts` (`normalizeLrc`, `shiftLrcOffset`, `stackLrcLayers`, opt-in A2 toggle), LRCLIB/sidecar fetch + progress controls, `.lrc` import (`selectLrcFile` + `lyricsImportFile`), draft autosave, and batch embed trigger.
-4. Verify all gates and spot-check embedded `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav`+`.lrc` outputs on Poweramp Android.
+1. Launch `npm run dev` (or packaged app) on Windows to verify interactive folder scan, Shift/Ctrl table selection, `media://` playback/seeking, live `onUnloadAudio` lock release during active playback embed, draft badge sync, and stacked translation output.
+2. Transfer embedded `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav` + `.lrc` sample tracks to Poweramp on Android and spot-check synced lyric rendering, `[offset:±ms]` polarity, and UTF-8/UTF-16 tag compatibility; update `docs/PROGRESS.md` once verified.
 
 ## Files in Scope
-- `src/renderer/src/{App.tsx,app.css,components/*}`
-- `src/shared/{ipc.ts,types.ts,lrc.ts}`
-- `src/preload/index.ts`
-- `src/main/index.ts`
+- `src/renderer/src/{App.tsx,app.css,types.ts,components/*}`
+- `src/shared/{lrc.ts,lyricsSync.ts,trackSelection.ts}`
+- `docs/{PROGRESS.md,HANDOFF.md}`
 
 ## Constraints / Open Blockers
-- None. (Environment note: on this Windows host, `.git` and `node_modules` ownership by `BUILTIN/Administrators` caused workspace sandbox `EPERM` on `.git/index.lock` and Vite `.mjs` temp config files; running outside sandbox succeeded.)
+- Physical Android device with Poweramp is required for the Phase 4 hardware spot-check (cannot be run inside automated Windows CLI checks).
+- Workspace sandbox note: `.git` and `node_modules` ownership by `BUILTIN/Administrators` causes `EPERM` on `.git/index.lock` and Vite `.mjs` temp config files inside the sandbox; Vitest, Electron-vite build, packaging, smoke test, and Git commits succeed outside the sandbox.
