@@ -399,6 +399,19 @@ export class AudioTagger {
     wavMtimeMs: number
   ): Promise<EmbedLyricsResult> {
     const sidecarPath = getSidecarLrcPath(wavPath)
+
+    // If lyrics is empty, remove the sidecar file if it exists
+    if (lyrics.length === 0) {
+      await safeUnlink(sidecarPath)
+      return {
+        filePath: wavPath,
+        targetPath: sidecarPath,
+        lyricsSource: 'sidecar',
+        preservedMtimeMs: wavMtimeMs,
+        verified: true
+      }
+    }
+
     const tmpPath = buildTempPath(sidecarPath)
 
     try {

@@ -17,6 +17,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { isPathWithinRoots } from './utils/pathContainment'
+import { isValidTrackId } from './utils/trackId'
 
 export const MEDIA_SCHEME = 'media'
 
@@ -133,33 +134,53 @@ export function parseRangeHeader(rangeHeader: string, fileSize: number): ByteRan
   return { start, end: Math.min(requestedEnd, fileSize - 1) }
 }
 
+interface TrackedStream {
+  webStream: ReadableStream<Uint8Array>
+  nodeStream: Readable
+  handle: fs.FileHandle
+  closedPromise: Promise<void>
+}
+
 /**
  * Tracks open response streams by normalized file path so an embed can close
  * every handle before the worker swaps the file on Windows.
  */
 export class StreamRegistry {
-  private readonly streams = new Map<string, Set<ReadableStream<Uint8Array>>>()
+  private readonly streams = new Map<string, Set<TrackedStream>>()
 
   private key(filePath: string): string {
     const resolved = path.resolve(filePath)
     return process.platform === 'win32' ? resolved.toLowerCase() : resolved
   }
 
-  register(filePath: string, stream: ReadableStream<Uint8Array>): void {
+  register(filePath: string, webStream: ReadableStream<Uint8Array>, nodeStream: Readable, handle: fs.FileHandle): void {
     const key = this.key(filePath)
+    const closedPromise = new Promise<void>((resolve) => {
+      const cleanup = () => resolve()
+      nodeStream.once('close', cleanup)
+      nodeStream.once('error', cleanup)
+      nodeStream.once('end', cleanup)
+    })
+
+    const tracked: TrackedStream = { webStream, nodeStream, handle, closedPromise }
     const existing = this.streams.get(key)
     if (existing) {
-      existing.add(stream)
+      existing.add(tracked)
       return
     }
-    this.streams.set(key, new Set([stream]))
+    this.streams.set(key, new Set([tracked]))
   }
 
-  unregister(filePath: string, stream: ReadableStream<Uint8Array>): void {
+  unregister(filePath: string, webStream: ReadableStream<Uint8Array>): void {
     const key = this.key(filePath)
     const existing = this.streams.get(key)
     if (!existing) return
-    existing.delete(stream)
+    for (const tracked of existing) {
+      if (tracked.webStream === webStream) {
+        existing.delete(tracked)
+        break
+      }
+    }
     if (existing.size === 0) {
       this.streams.delete(key)
     }
@@ -185,19 +206,32 @@ export class StreamRegistry {
       return
     }
 
-    const streams = [...existing]
+    const trackedStreams = [...existing]
     this.streams.delete(key)
 
-    const cancellations = streams.map(async (stream) => {
+    // Cancel web streams, destroy node streams, and close handles
+    for (const tracked of trackedStreams) {
       try {
-        await stream.cancel()
+        await tracked.webStream.cancel()
       } catch {
-        // A locked/consumed stream may reject; the handle is still released.
+        // Ignore cancellation errors
       }
-    })
+      try {
+        tracked.nodeStream.destroy()
+      } catch {
+        // Ignore destruction errors
+      }
+      try {
+        await tracked.handle.close()
+      } catch {
+        // Ignore handle close errors
+      }
+    }
 
+    // Wait for all closedPromises to settle, bounded by timeout
+    const closePromises = trackedStreams.map((tracked) => tracked.closedPromise)
     try {
-      await withTimeout(Promise.all(cancellations), timeoutMs, 'Stream close timed out')
+      await withTimeout(Promise.all(closePromises), timeoutMs, 'Stream close timed out')
     } catch {
       // Proceed after the bounded wait even if a stream never settles.
     }
@@ -209,10 +243,11 @@ export const mediaStreamRegistry = new StreamRegistry()
 function createTrackedStream(
   nodeStream: Readable,
   filePath: string,
+  handle: fs.FileHandle,
   registry: StreamRegistry
 ): ReadableStream<Uint8Array> {
   const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream<Uint8Array>
-  registry.register(filePath, webStream)
+  registry.register(filePath, webStream, nodeStream, handle)
 
   const done = (): void => {
     registry.unregister(filePath, webStream)
@@ -252,9 +287,20 @@ export function createMediaHandler(
       return errorResponse(400, 'Invalid media URL format')
     }
 
-    const trackId = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
+    let trackId: string
+    try {
+      trackId = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
+    } catch {
+      return errorResponse(400, 'Malformed track ID encoding')
+    }
+
     if (trackId.length === 0 || trackId.includes('/')) {
       return errorResponse(400, 'Missing track ID')
+    }
+
+    // Validate trackId format: 32-char lowercase hex
+    if (!isValidTrackId(trackId)) {
+      return errorResponse(400, 'Invalid track ID format')
     }
 
     const resolved = await options.resolveTrack(trackId)
@@ -270,8 +316,12 @@ export function createMediaHandler(
     try {
       stat = await fs.stat(resolved.filePath)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      const errno = (error as NodeJS.ErrnoException).code
+      if (errno === 'ENOENT') {
         return errorResponse(404, 'File not found on disk')
+      }
+      if (errno === 'EACCES' || errno === 'EPERM') {
+        return errorResponse(403, 'Permission denied')
       }
       return errorResponse(500, 'File system error')
     }
@@ -312,14 +362,14 @@ export function createMediaHandler(
           end: fileSize - 1,
           autoClose: true
         })
-        const body = createTrackedStream(nodeStream, resolved.filePath, registry)
+        const body = createTrackedStream(nodeStream, resolved.filePath, handle, registry)
         return new Response(body, {
           status: 200,
           headers: {
             'Content-Type': mimeType,
             'Content-Length': String(fileSize),
             'Accept-Ranges': 'bytes',
-            'Cache-Control': 'public, max-age=31536000'
+            'Cache-Control': 'no-store'
           }
         })
       } catch (error) {
@@ -347,7 +397,7 @@ export function createMediaHandler(
         end: range.end,
         autoClose: true
       })
-      const body = createTrackedStream(nodeStream, resolved.filePath, registry)
+      const body = createTrackedStream(nodeStream, resolved.filePath, handle, registry)
       return new Response(body, {
         status: 206,
         headers: {
@@ -355,7 +405,7 @@ export function createMediaHandler(
           'Content-Length': String(contentLength),
           'Content-Range': `bytes ${range.start}-${range.end}/${fileSize}`,
           'Accept-Ranges': 'bytes',
-          'Cache-Control': 'public, max-age=31536000'
+          'Cache-Control': 'no-store'
         }
       })
     } catch (error) {

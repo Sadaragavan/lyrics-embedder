@@ -25,7 +25,7 @@ import {
   retryOnLockError,
   type RetryOptions
 } from './tagger'
-import { computeTrackId, normalizePathKey } from './utils/trackId'
+import { computeTrackId, isValidTrackId, normalizePathKey } from './utils/trackId'
 
 export { computeTrackId }
 
@@ -124,6 +124,7 @@ export class JsonStore {
   readonly draftsDir: string
   readonly indexPath: string
   private readonly options: StoreOptions
+  private writeQueue: Promise<void> = Promise.resolve()
 
   constructor(userDataDir: string, options: StoreOptions = {}) {
     this.userDataDir = path.resolve(userDataDir)
@@ -133,7 +134,19 @@ export class JsonStore {
   }
 
   private draftPath(trackId: string): string {
+    if (!isValidTrackId(trackId)) {
+      throw new Error(`Invalid trackId format: ${trackId}`)
+    }
     return path.join(this.draftsDir, `${computeDraftId(trackId)}.json`)
+  }
+
+  private enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.writeQueue.then(task, task)
+    this.writeQueue = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
   }
 
   async readIndex(): Promise<LibraryIndex> {
@@ -145,6 +158,8 @@ export class JsonStore {
   }
 
   async writeIndex(index: LibraryIndex): Promise<void> {
+    // Internal method - does not use queue since callers (addRoot, removeRoot, etc.)
+    // already serialize via enqueueWrite
     await writeJson(this.indexPath, cloneIndex(index), this.options)
   }
 
@@ -164,64 +179,82 @@ export class JsonStore {
   }
 
   async addRoot(root: LibraryRoot): Promise<LibraryRoot> {
-    const index = await this.readIndex()
-    const existing = index.roots.find(
-      (candidate) => normalizePathKey(candidate.path) === normalizePathKey(root.path)
-    )
-    if (existing) {
-      return existing
-    }
-    index.roots.push(root)
-    await this.writeIndex(index)
-    return root
+    return this.enqueueWrite(async () => {
+      const index = await this.readIndex()
+      const existing = index.roots.find(
+        (candidate) => normalizePathKey(candidate.path) === normalizePathKey(root.path)
+      )
+      if (existing) {
+        return existing
+      }
+      index.roots.push(root)
+      await this.writeIndex(index)
+      return root
+    })
   }
 
   async removeRoot(rootId: string): Promise<boolean> {
-    const index = await this.readIndex()
-    const nextRoots = index.roots.filter((root) => root.id !== rootId)
-    if (nextRoots.length === index.roots.length) {
-      return false
-    }
-    const removedTrackIds = index.tracks
-      .filter((track) => track.libraryRootId === rootId)
-      .map((track) => track.id)
+    return this.enqueueWrite(async () => {
+      const index = await this.readIndex()
+      const nextRoots = index.roots.filter((root) => root.id !== rootId)
+      if (nextRoots.length === index.roots.length) {
+        return false
+      }
+      const removedTrackIds = index.tracks
+        .filter((track) => track.libraryRootId === rootId)
+        .map((track) => track.id)
 
-    index.roots = nextRoots
-    index.tracks = index.tracks.filter((track) => track.libraryRootId !== rootId)
-    await this.writeIndex(index)
+      index.roots = nextRoots
+      index.tracks = index.tracks.filter((track) => track.libraryRootId !== rootId)
+      await this.writeIndex(index)
 
-    await Promise.all(removedTrackIds.map((trackId) => this.deleteDraft(trackId)))
-    return true
+      await Promise.all(removedTrackIds.map((trackId) => this._deleteDraftInternal(trackId)))
+      return true
+    })
   }
 
   async markRootScanned(rootId: string, scannedAt = new Date().toISOString()): Promise<void> {
-    const index = await this.readIndex()
-    const root = index.roots.find((candidate) => candidate.id === rootId)
-    if (!root) return
-    root.lastScannedAt = scannedAt
-    await this.writeIndex(index)
+    return this.enqueueWrite(async () => {
+      const index = await this.readIndex()
+      const root = index.roots.find((candidate) => candidate.id === rootId)
+      if (!root) return
+      root.lastScannedAt = scannedAt
+      await this.writeIndex(index)
+    })
   }
 
   async upsertTracks(tracks: readonly TrackRecord[]): Promise<void> {
     if (tracks.length === 0) return
-    const index = await this.readIndex()
-    const trackMap = new Map(index.tracks.map((track) => [track.id, track]))
-    for (const track of tracks) {
-      trackMap.set(track.id, track)
-    }
-    index.tracks = [...trackMap.values()]
-    await this.writeIndex(index)
+    return this.enqueueWrite(async () => {
+      const index = await this.readIndex()
+      const trackMap = new Map(index.tracks.map((track) => [track.id, track]))
+      for (const track of tracks) {
+        const existing = trackMap.get(track.id)
+        // Preserve existing draftId if the incoming track doesn't have one
+        const mergedTrack = existing?.draftId && !track.draftId
+          ? { ...track, draftId: existing.draftId }
+          : track
+        trackMap.set(track.id, mergedTrack)
+      }
+      index.tracks = [...trackMap.values()]
+      await this.writeIndex(index)
+    })
   }
 
   async removeTracks(trackIds: readonly string[]): Promise<void> {
     if (trackIds.length === 0) return
-    const index = await this.readIndex()
-    const toRemove = new Set(trackIds)
-    index.tracks = index.tracks.filter((track) => !toRemove.has(track.id))
-    await this.writeIndex(index)
+    return this.enqueueWrite(async () => {
+      const index = await this.readIndex()
+      const toRemove = new Set(trackIds)
+      index.tracks = index.tracks.filter((track) => !toRemove.has(track.id))
+      await this.writeIndex(index)
+    })
   }
 
   async readDraft(trackId: string): Promise<LyricDraft | null> {
+    if (!isValidTrackId(trackId)) {
+      throw new Error(`Invalid trackId format: ${trackId}`)
+    }
     return readJson<LyricDraft>(this.draftPath(trackId))
   }
 
@@ -229,34 +262,56 @@ export class JsonStore {
     if (typeof input.trackId !== 'string' || input.trackId.length === 0) {
       throw new Error('Draft requires a non-empty trackId')
     }
+    if (!isValidTrackId(input.trackId)) {
+      throw new Error(`Invalid trackId format: ${input.trackId}`)
+    }
     if (typeof input.lyrics !== 'string') {
       throw new Error('Draft lyrics must be a string')
     }
 
-    const draft: LyricDraft = {
-      id: computeDraftId(input.trackId),
-      trackId: input.trackId,
-      lyrics: input.lyrics,
-      updatedAt: new Date().toISOString(),
-      status: input.status ?? 'pending'
-    }
+    return this.enqueueWrite(async () => {
+      const draft: LyricDraft = {
+        id: computeDraftId(input.trackId),
+        trackId: input.trackId,
+        lyrics: input.lyrics,
+        updatedAt: new Date().toISOString(),
+        status: input.status ?? 'pending'
+      }
 
-    await writeJson(this.draftPath(input.trackId), draft, this.options)
+      await writeJson(this.draftPath(input.trackId), draft, this.options)
 
-    // Best-effort: reflect the draft on the track record for the UI.
-    const index = await this.readIndex()
-    const track = index.tracks.find((candidate) => candidate.id === input.trackId)
-    if (track && track.draftId !== draft.id) {
-      track.draftId = draft.id
-      await this.writeIndex(index)
-    }
+      // Best-effort: reflect the draft on the track record for the UI.
+      const index = await this.readIndex()
+      const track = index.tracks.find((candidate) => candidate.id === input.trackId)
+      if (track && track.draftId !== draft.id) {
+        track.draftId = draft.id
+        await this.writeIndex(index)
+      }
 
-    return draft
+      return draft
+    })
   }
 
   async deleteDraft(trackId: string): Promise<boolean> {
+    if (!isValidTrackId(trackId)) {
+      throw new Error(`Invalid trackId format: ${trackId}`)
+    }
+    return this.enqueueWrite(() => this._deleteDraftInternal(trackId))
+  }
+
+  /**
+   * Internal deleteDraft without queue - for use within already-queued operations.
+   */
+  async _deleteDraftInternal(trackId: string): Promise<boolean> {
     try {
       await fs.unlink(this.draftPath(trackId))
+      // Clear draftId from the track record
+      const index = await this.readIndex()
+      const track = index.tracks.find((candidate) => candidate.id === trackId)
+      if (track && track.draftId) {
+        track.draftId = undefined
+        await this.writeIndex(index)
+      }
       return true
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -287,12 +342,20 @@ export class JsonStore {
   }
 
   /**
-   * Creates the drafts directory and runs the startup temp sweep across all
-   * authorized library roots.
+   * Creates the drafts directory, purges orphaned *.tmp files inside userData,
+   * and runs the startup temp sweep across all authorized library roots.
    */
   async initialize(): Promise<string[]> {
     await fs.mkdir(this.draftsDir, { recursive: true })
-    return this.sweepRoots()
+
+    // Clean up orphaned *.tmp files in userData (drafts directory)
+    const userDataRemoved = await cleanupStaleTempFiles(this.userDataDir, { recursive: true })
+    if (userDataRemoved.length > 0) {
+      console.log(`[store] removed ${userDataRemoved.length} orphaned staging file(s) from userData`)
+    }
+
+    const rootRemoved = await this.sweepRoots()
+    return [...userDataRemoved, ...rootRemoved]
   }
 }
 

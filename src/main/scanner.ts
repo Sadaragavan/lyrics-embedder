@@ -14,6 +14,7 @@ import {
 } from '@shared/types'
 import type { TrackMetadata } from '@shared/ipc'
 import { computeTrackId } from './utils/trackId'
+import { isLrcEmbedTempFile } from './tagger'
 
 export interface ScanProgressUpdate {
   processed: number
@@ -71,7 +72,7 @@ export async function walkAudioFiles(
         continue
       }
 
-      if (stat.isFile() && allowed.has(path.extname(entry.name).toLowerCase())) {
+      if (stat.isFile() && allowed.has(path.extname(entry.name).toLowerCase()) && !isLrcEmbedTempFile(entry.name)) {
         files.push(fullPath)
       }
     }

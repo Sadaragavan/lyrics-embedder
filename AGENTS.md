@@ -13,7 +13,7 @@ Read `docs/ARCHITECTURE.md`, `docs/PROGRESS.md`, and `docs/HANDOFF.md` before pl
 - `docs/`: `ARCHITECTURE.md` (module contracts), `PROGRESS.md` (milestones and known gaps), `HANDOFF.md` (live baton between agents).
 
 ## Sequential Multi-Agent Protocol
-- Startup check: Read `docs/HANDOFF.md` and compare its `Base commit` SHA against `git log -n 1 --format=%h -- . ":(exclude)docs/HANDOFF.md"`. If they differ, inspect `git log -n 5 --oneline` before doing any work.
+- Startup check: Read `docs/HANDOFF.md` and compare its `Base commit` SHA against `git log -n 1 --format=%h -- . ":(exclude)docs/"`. If they differ, inspect `git log -n 5 --oneline` before doing any work.
 - Single-writer boundary: Do not begin edits on a dirty working tree without reporting `git status --short` first. Never force-push `main`.
 - Exit gate: Run all applicable verification commands below, overwrite `docs/HANDOFF.md` (keep under 60 lines), update `docs/PROGRESS.md` only when a milestone or invariant changes, and leave a clean commit before switching tools. Use the `.agents/skills/handoff/SKILL.md` workflow when running in OpenCode or Antigravity CLI.
 

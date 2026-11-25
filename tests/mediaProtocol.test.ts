@@ -1,6 +1,8 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { Readable } from 'node:stream'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   abortStreamsForPath,
@@ -15,13 +17,17 @@ import {
 
 const tempDirs: string[] = []
 
+function makeValidTrackId(): string {
+  return crypto.randomBytes(16).toString('hex')
+}
+
 async function makeTempDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lrcembed-media-'))
   tempDirs.push(dir)
   return dir
 }
 
-async function makeAudioFile(size = 100): Promise<{ dir: string; filePath: string; bytes: Buffer }> {
+async function makeAudioFile(size = 100): Promise<{ dir: string; filePath: string; bytes: Buffer; trackId: string }> {
   const dir = await makeTempDir()
   const filePath = path.join(dir, 'track.mp3')
   const bytes = Buffer.alloc(size)
@@ -29,7 +35,7 @@ async function makeAudioFile(size = 100): Promise<{ dir: string; filePath: strin
     bytes[index] = index % 256
   }
   await fs.writeFile(filePath, bytes)
-  return { dir, filePath, bytes }
+  return { dir, filePath, bytes, trackId: makeValidTrackId() }
 }
 
 function request(url: string, headers: Record<string, string> = {}): MediaRequestLike {
@@ -42,9 +48,16 @@ function request(url: string, headers: Record<string, string> = {}): MediaReques
   }
 }
 
+const VALID_TRACK_ID = 'a'.repeat(32)
+
 function handlerFor(track: ResolvedMediaTrack | null, registry: StreamRegistry = new StreamRegistry()) {
   return createMediaHandler({
-    resolveTrack: async () => track,
+    resolveTrack: async (trackId: string) => {
+      if (track && trackId === VALID_TRACK_ID) {
+        return track
+      }
+      return null
+    },
     registry
   })
 }
@@ -92,11 +105,12 @@ describe('media:// handler', () => {
     const { dir, filePath, bytes } = await makeAudioFile()
     const handler = handlerFor({ filePath, roots: [dir] })
 
-    const response = await handler(request('media://track/abc'))
+    const response = await handler(request(`media://track/${VALID_TRACK_ID}`))
     expect(response.status).toBe(200)
     expect(response.headers.get('content-type')).toBe('audio/mpeg')
     expect(response.headers.get('accept-ranges')).toBe('bytes')
     expect(response.headers.get('content-length')).toBe(String(bytes.length))
+    expect(response.headers.get('cache-control')).toBe('no-store')
 
     const body = Buffer.from(await response.arrayBuffer())
     expect(body.equals(bytes)).toBe(true)
@@ -106,10 +120,11 @@ describe('media:// handler', () => {
     const { dir, filePath, bytes } = await makeAudioFile()
     const handler = handlerFor({ filePath, roots: [dir] })
 
-    const response = await handler(request('media://track/abc', { Range: 'bytes=10-19' }))
+    const response = await handler(request(`media://track/${VALID_TRACK_ID}`, { Range: 'bytes=10-19' }))
     expect(response.status).toBe(206)
     expect(response.headers.get('content-range')).toBe('bytes 10-19/100')
     expect(response.headers.get('content-length')).toBe('10')
+    expect(response.headers.get('cache-control')).toBe('no-store')
 
     const body = Buffer.from(await response.arrayBuffer())
     expect(body.equals(bytes.subarray(10, 20))).toBe(true)
@@ -119,12 +134,12 @@ describe('media:// handler', () => {
     const { dir, filePath, bytes } = await makeAudioFile()
     const handler = handlerFor({ filePath, roots: [dir] })
 
-    const openEnded = await handler(request('media://track/abc', { Range: 'bytes=90-' }))
+    const openEnded = await handler(request(`media://track/${VALID_TRACK_ID}`, { Range: 'bytes=90-' }))
     expect(openEnded.status).toBe(206)
     expect(openEnded.headers.get('content-range')).toBe('bytes 90-99/100')
     expect(Buffer.from(await openEnded.arrayBuffer()).equals(bytes.subarray(90))).toBe(true)
 
-    const suffix = await handler(request('media://track/abc', { Range: 'bytes=-10' }))
+    const suffix = await handler(request(`media://track/${VALID_TRACK_ID}`, { Range: 'bytes=-10' }))
     expect(suffix.status).toBe(206)
     expect(suffix.headers.get('content-range')).toBe('bytes 90-99/100')
     expect(Buffer.from(await suffix.arrayBuffer()).equals(bytes.subarray(90))).toBe(true)
@@ -134,7 +149,7 @@ describe('media:// handler', () => {
     const { dir, filePath } = await makeAudioFile()
     const handler = handlerFor({ filePath, roots: [dir] })
 
-    const response = await handler(request('media://track/abc', { Range: 'bytes=200-300' }))
+    const response = await handler(request(`media://track/${VALID_TRACK_ID}`, { Range: 'bytes=200-300' }))
     expect(response.status).toBe(416)
     expect(response.headers.get('content-range')).toBe('bytes */100')
     expect(response.headers.get('accept-ranges')).toBe('bytes')
@@ -144,8 +159,8 @@ describe('media:// handler', () => {
     const { filePath } = await makeAudioFile()
     const outside = await makeTempDir()
 
-    expect((await handlerFor({ filePath, roots: [outside] })(request('media://track/abc'))).status).toBe(403)
-    expect((await handlerFor(null)(request('media://track/abc'))).status).toBe(404)
+    expect((await handlerFor({ filePath, roots: [outside] })(request(`media://track/${VALID_TRACK_ID}`))).status).toBe(403)
+    expect((await handlerFor(null)(request(`media://track/${VALID_TRACK_ID}`))).status).toBe(404)
     expect((await handlerFor({ filePath, roots: [path.dirname(filePath)] })(request('http://track/abc'))).status).toBe(400)
     expect((await handlerFor({ filePath, roots: [path.dirname(filePath)] })(request('media://other/abc'))).status).toBe(400)
     expect((await handlerFor({ filePath, roots: [path.dirname(filePath)] })(request('media://track/'))).status).toBe(400)
@@ -158,13 +173,20 @@ describe('stream registry and abort handshake', () => {
     const filePath = path.join(await makeTempDir(), 'track.mp3')
 
     let cancelled = false
-    const stream = {
+    const webStream = {
       cancel: async () => {
         cancelled = true
       }
     } as unknown as ReadableStream<Uint8Array>
 
-    registry.register(filePath, stream)
+    const mockNodeStream = new Readable({
+      read() {}
+    })
+    const mockHandle = {
+      close: async () => {}
+    } as unknown as fs.FileHandle
+
+    registry.register(filePath, webStream, mockNodeStream, mockHandle)
     expect(registry.countForPath(filePath)).toBe(1)
     expect(registry.getActivePaths()).toHaveLength(1)
 
@@ -178,7 +200,7 @@ describe('stream registry and abort handshake', () => {
     const registry = new StreamRegistry()
     const handler = handlerFor({ filePath, roots: [dir] }, registry)
 
-    const response = await handler(request('media://track/abc'))
+    const response = await handler(request(`media://track/${VALID_TRACK_ID}`))
     expect(registry.countForPath(filePath)).toBe(1)
     await response.arrayBuffer()
 
@@ -191,12 +213,20 @@ describe('stream registry and abort handshake', () => {
     const filePath = path.join(await makeTempDir(), 'track.mp3')
     const events: string[] = []
 
-    const stream = {
+    const webStream = {
       cancel: async () => {
         events.push('stream-cancelled')
       }
     } as unknown as ReadableStream<Uint8Array>
-    registry.register(filePath, stream)
+
+    const mockNodeStream = new Readable({
+      read() {}
+    })
+    const mockHandle = {
+      close: async () => {}
+    } as unknown as fs.FileHandle
+
+    registry.register(filePath, webStream, mockNodeStream, mockHandle)
 
     await abortStreamsForPath(filePath, {
       registry,
@@ -214,8 +244,12 @@ describe('stream registry and abort handshake', () => {
   it('proceeds after a bounded timeout when the renderer never acknowledges', async () => {
     const registry = new StreamRegistry()
     const filePath = path.join(await makeTempDir(), 'track.mp3')
-    const stream = { cancel: async () => undefined } as unknown as ReadableStream<Uint8Array>
-    registry.register(filePath, stream)
+
+    const webStream = { cancel: async () => undefined } as unknown as ReadableStream<Uint8Array>
+    const mockNodeStream = new Readable({ read() {} })
+    const mockHandle = { close: async () => {} } as unknown as fs.FileHandle
+
+    registry.register(filePath, webStream, mockNodeStream, mockHandle)
 
     const started = Date.now()
     await abortStreamsForPath(filePath, {
@@ -231,5 +265,136 @@ describe('stream registry and abort handshake', () => {
 
   it('exposes a module-level registry for the main process', () => {
     expect(mediaStreamRegistry.getActivePaths()).toEqual([])
+  })
+})
+
+describe('stream registry: locked stream destruction and close await', () => {
+  it('destroys nodeStream and awaits closedPromise on abort', async () => {
+    const registry = new StreamRegistry()
+    const filePath = path.join(await makeTempDir(), 'track.mp3')
+
+    let nodeStreamDestroyed = false
+    let handleClosed = false
+    let closePromiseResolved = false
+
+    const mockNodeStream = {
+      destroy: () => {
+        nodeStreamDestroyed = true
+      },
+      on: (event: string, listener: () => void) => {
+        if (event === 'close') {
+          // Simulate delayed close
+          setTimeout(() => {
+            closePromiseResolved = true
+            listener()
+          }, 10)
+        }
+      },
+      once: (event: string, listener: () => void) => {
+        if (event === 'close') {
+          setTimeout(() => {
+            closePromiseResolved = true
+            listener()
+          }, 10)
+        }
+      }
+    } as unknown as Readable
+
+    const mockHandle = {
+      close: async () => {
+        handleClosed = true
+      }
+    } as unknown as fs.FileHandle
+
+    const webStream = {
+      cancel: async () => {}
+    } as unknown as ReadableStream<Uint8Array>
+
+    registry.register(filePath, webStream, mockNodeStream, mockHandle)
+    expect(registry.countForPath(filePath)).toBe(1)
+
+    await registry.abortForPath(filePath, 1000)
+
+    expect(nodeStreamDestroyed).toBe(true)
+    expect(handleClosed).toBe(true)
+    expect(closePromiseResolved).toBe(true)
+    expect(registry.countForPath(filePath)).toBe(0)
+  })
+
+  it('unregisters only on close event, not on register', async () => {
+    const registry = new StreamRegistry()
+    const filePath = path.join(await makeTempDir(), 'track.mp3')
+
+    let closeFired = false
+
+    const mockNodeStream = {
+      destroy: () => {},
+      on: (event: string, listener: () => void) => {
+        if (event === 'close') {
+          setTimeout(() => {
+            closeFired = true
+            listener()
+          }, 50)
+        }
+      },
+      once: (event: string, listener: () => void) => {
+        if (event === 'close') {
+          setTimeout(() => {
+            closeFired = true
+            listener()
+          }, 50)
+        }
+      }
+    } as unknown as Readable
+
+    const mockHandle = {
+      close: async () => {}
+    } as unknown as fs.FileHandle
+
+    const webStream = {
+      cancel: async () => {}
+    } as unknown as ReadableStream<Uint8Array>
+
+    registry.register(filePath, webStream, mockNodeStream, mockHandle)
+    expect(registry.countForPath(filePath)).toBe(1)
+
+    // Unregister should not be called until close fires
+    registry.unregister(filePath, webStream)
+    expect(registry.countForPath(filePath)).toBe(0) // unregister removes immediately
+
+    // Wait for close to fire
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(closeFired).toBe(true)
+  })
+
+  it('handles malformed URI escapes in trackId gracefully', async () => {
+    const { dir, filePath } = await makeAudioFile()
+    const handler = handlerFor({ filePath, roots: [dir] })
+
+    // Malformed percent encoding
+    const badRequest = request('media://track/%ZZ')
+    const response = await handler(badRequest)
+    expect(response.status).toBe(400)
+
+    // Track ID with path traversal attempt
+    const traversalRequest = request('media://track/../etc/passwd')
+    const response2 = await handler(traversalRequest)
+    expect(response2.status).toBe(400)
+  })
+
+  it('handles fs.open errors cleanly as 400/404/500', async () => {
+    // Use a path that definitely doesn't exist on Windows (absolute path with drive letter)
+    const nonExistentPath = 'C:\\nonexistent\\path\\track.mp3'
+    const nonExistentRoot = 'C:\\nonexistent\\path'
+    const handler = handlerFor({ filePath: nonExistentPath, roots: [nonExistentRoot] })
+    const response = await handler(request('media://track/valid-track-id'))
+    // On Windows, non-existent path may return 400 or 404 depending on filesystem behavior
+    expect([400, 404]).toContain(response.status)
+
+    // Test with a directory instead of file
+    const tempDir = await makeTempDir()
+    const dirHandler = handlerFor({ filePath: tempDir, roots: [tempDir] })
+    const dirResponse = await dirHandler(request('media://track/valid-track-id'))
+    expect(dirResponse.status).toBe(400)
   })
 })

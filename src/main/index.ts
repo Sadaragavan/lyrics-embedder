@@ -42,6 +42,7 @@ import {
 import { createStore, computeTrackId, type JsonStore } from './store'
 import { cleanupStaleTempFiles, isSupportedAudioPath } from './tagger'
 import { isPathWithinRoots } from './utils/pathContainment'
+import { isValidTrackId, resolveRealPath } from './utils/trackId'
 import { resolveTaglibWasmPath } from './wasmPath'
 
 const MAX_LYRICS_BYTES = 1024 * 1024
@@ -70,7 +71,8 @@ let workerStartPromise: Promise<void> | null = null
 let restartAttempts = 0
 let restartSuppressed = false
 let isQuitting = false
-let activeTargetDir: string | null = null
+// Ref-counted active target directories for temp sweep
+const activeTargetDirs = new Map<string, number>()
 let store: JsonStore | null = null
 
 let nextRequestId = 1
@@ -121,6 +123,9 @@ function rejectAllPending(reason: string): void {
   pendingRequests.clear()
 }
 
+// Bounded timeout for post-init worker RPCs
+const WORKER_RPC_TIMEOUT_MS = 30_000
+
 function sendWorkerRequest<T>(payload: WorkerPayload): Promise<T> {
   if (!worker) {
     return Promise.reject(new Error('Audio worker is not running'))
@@ -129,29 +134,37 @@ function sendWorkerRequest<T>(payload: WorkerPayload): Promise<T> {
   const request: WorkerRequest = { id, ...payload }
 
   return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingRequests.delete(id)
+      reject(new Error(`Worker RPC timed out after ${WORKER_RPC_TIMEOUT_MS}ms`))
+    }, WORKER_RPC_TIMEOUT_MS)
+
     pendingRequests.set(id, {
       resolve: (response) => {
+        clearTimeout(timeout)
         if (response.ok) {
           resolve(response.result as T)
         } else {
           reject(new Error(response.error))
         }
       },
-      reject
+      reject: (error) => {
+        clearTimeout(timeout)
+        reject(error)
+      }
     })
     worker?.postMessage(request)
   })
 }
 
-async function sweepActiveTargetDir(): Promise<void> {
-  if (!activeTargetDir) return
+async function sweepActiveTargetDir(dirPath: string): Promise<void> {
   try {
-    const removed = await cleanupStaleTempFiles(activeTargetDir, { recursive: false })
+    const removed = await cleanupStaleTempFiles(dirPath, { recursive: false })
     if (removed.length > 0) {
-      console.log(`[audioWorker] removed ${removed.length} orphaned staging file(s)`)
+      console.log(`[audioWorker] removed ${removed.length} orphaned staging file(s) from ${dirPath}`)
     }
   } catch (error) {
-    console.warn('[audioWorker] temp sweep after crash failed:', error)
+    console.warn(`[audioWorker] temp sweep after crash failed for ${dirPath}:`, error)
   }
 }
 
@@ -176,14 +189,17 @@ function handleWorkerExit(child: UtilityProcess, code: number): void {
   }
 
   void (async () => {
-    await sweepActiveTargetDir()
+    // Sweep all active target dirs
+    for (const dirPath of activeTargetDirs.keys()) {
+      await sweepActiveTargetDir(dirPath)
+    }
     if (restartAttempts >= WORKER_RESTART_LIMIT) {
       console.error(`[audioWorker] restart limit (${WORKER_RESTART_LIMIT}) reached`)
       return
     }
     restartAttempts++
     setTimeout(() => {
-      if (!worker && !isQuitting) {
+      if (!worker && !isQuitting && !restartSuppressed) {
         void startAudioWorker()
       }
     }, 500)
@@ -256,7 +272,9 @@ async function startAudioWorkerInternal(): Promise<void> {
     }
     console.error(`[audioWorker] initialization failed: ${message}`)
     restartSuppressed = true
+    worker = null
     child.kill()
+    rejectAllPending(`Audio worker initialization failed: ${message}`)
   }
 }
 
@@ -274,24 +292,35 @@ async function validateAudioFilePath(rawPath: unknown): Promise<string> {
   if (typeof rawPath !== 'string' || rawPath.length === 0 || rawPath.includes('\0')) {
     throw new Error('Invalid file path')
   }
+  // Reject relative paths before resolving
+  if (!path.isAbsolute(rawPath)) {
+    throw new Error(`Path must be absolute: ${rawPath}`)
+  }
   const normalized = path.resolve(rawPath)
-  if (!path.isAbsolute(normalized) || !isSupportedAudioPath(normalized)) {
+  if (!isSupportedAudioPath(normalized)) {
     throw new Error(`Unsupported audio path: ${rawPath}`)
   }
-  const stat = await fs.stat(normalized)
+
+  // Resolve real path to block symlink escapes
+  const realPath = await resolveRealPath(normalized)
+
+  const stat = await fs.stat(realPath)
   if (!stat.isFile()) {
-    throw new Error(`Path is not a file: ${normalized}`)
+    throw new Error(`Path is not a file: ${realPath}`)
   }
 
   // When library roots exist, restrict operations to authorized roots.
   if (store) {
     const roots = await store.getRoots()
-    if (roots.length > 0 && !isPathWithinRoots(normalized, roots.map((root) => root.path))) {
-      throw new Error(`Path is outside authorized library roots: ${normalized}`)
+    if (roots.length === 0) {
+      throw new Error('No authorized library roots configured')
+    }
+    if (!isPathWithinRoots(realPath, roots.map((root) => root.path))) {
+      throw new Error(`Path is outside authorized library roots: ${realPath}`)
     }
   }
 
-  return normalized
+  return realPath
 }
 
 function validateEmbedPayload(payload: unknown): EmbedLyricsRequest {
@@ -494,6 +523,11 @@ function registerIpcHandlers(): void {
       const validated = validateEmbedPayload(rawPayload)
       const filePath = await validateAudioFilePath(validated.filePath)
 
+      // Check worker is available before proceeding
+      if (!worker) {
+        throw new Error('Audio worker is not running')
+      }
+
       // Windows lock handshake: unload <audio> and close all media:// handles
       // before the worker stages/swaps the file.
       await abortStreamsForPath(filePath, {
@@ -502,7 +536,10 @@ function registerIpcHandlers(): void {
         closeTimeoutMs: STREAM_CLOSE_TIMEOUT_MS
       })
 
-      activeTargetDir = path.dirname(filePath)
+      const targetDir = path.dirname(filePath)
+      // Increment ref count for target dir
+      const prevCount = activeTargetDirs.get(targetDir) ?? 0
+      activeTargetDirs.set(targetDir, prevCount + 1)
       try {
         const result = await sendWorkerRequest<EmbedLyricsResult>({
           type: 'embedLyrics',
@@ -512,7 +549,13 @@ function registerIpcHandlers(): void {
         await refreshTrackAfterEmbed(filePath, result)
         return result
       } finally {
-        activeTargetDir = null
+        // Decrement ref count and clean up if zero
+        const count = activeTargetDirs.get(targetDir) ?? 1
+        if (count <= 1) {
+          activeTargetDirs.delete(targetDir)
+        } else {
+          activeTargetDirs.set(targetDir, count - 1)
+        }
       }
     }
   )
@@ -582,17 +625,27 @@ function registerIpcHandlers(): void {
       if (typeof rawTrackId !== 'string' || rawTrackId.length === 0) {
         throw new Error('Invalid track id')
       }
+      if (!isValidTrackId(rawTrackId)) {
+        throw new Error('Invalid track id format')
+      }
       return requireStore().getTrack(rawTrackId)
     }
   )
 
   ipcMain.handle(IPC_CHANNELS.saveDraft, async (_event, rawPayload: unknown) => {
-    return requireStore().saveDraft(validateSaveDraft(rawPayload))
+    const validated = validateSaveDraft(rawPayload)
+    if (!isValidTrackId(validated.trackId)) {
+      throw new Error('Invalid track id format')
+    }
+    return requireStore().saveDraft(validated)
   })
 
   ipcMain.handle(IPC_CHANNELS.getDraft, async (_event, rawTrackId: unknown) => {
     if (typeof rawTrackId !== 'string' || rawTrackId.length === 0) {
       throw new Error('Invalid track id')
+    }
+    if (!isValidTrackId(rawTrackId)) {
+      throw new Error('Invalid track id format')
     }
     return requireStore().readDraft(rawTrackId)
   })
@@ -600,6 +653,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.deleteDraft, async (_event, rawTrackId: unknown) => {
     if (typeof rawTrackId !== 'string' || rawTrackId.length === 0) {
       throw new Error('Invalid track id')
+    }
+    if (!isValidTrackId(rawTrackId)) {
+      throw new Error('Invalid track id format')
     }
     return requireStore().deleteDraft(rawTrackId)
   })
@@ -609,6 +665,9 @@ function registerIpcHandlers(): void {
     async (_event, rawTrackId: unknown): Promise<MediaUrl> => {
       if (typeof rawTrackId !== 'string' || rawTrackId.length === 0) {
         throw new Error('Invalid track id')
+      }
+      if (!isValidTrackId(rawTrackId)) {
+        throw new Error('Invalid track id format')
       }
       const library = requireStore()
       const index = await library.readIndex()
@@ -654,6 +713,13 @@ async function createMainWindow(): Promise<void> {
   })
 
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  // Restrict navigation to prevent loading external URLs
+  win.webContents.on('will-navigate', (event, url) => {
+    if (url.startsWith('file://') || url.startsWith(`${MEDIA_SCHEME}://`)) {
+      return
+    }
+    event.preventDefault()
+  })
   win.on('closed', () => {
     if (mainWindow === win) {
       mainWindow = null

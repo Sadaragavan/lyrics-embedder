@@ -155,3 +155,66 @@ describe('scanAudioLibrary', () => {
     expect(errors).toBe(1)
   })
 })
+
+describe('walkAudioFiles excludes *.lrcembed.*.tmp.* files', () => {
+  it('skips staging temp files matching *.lrcembed.*.tmp.* pattern', async () => {
+    const root = await makeTempDir()
+    const audioFiles = [
+      path.join(root, 'track1.mp3'),
+      path.join(root, 'track2.flac')
+    ]
+    const tempFiles = [
+      path.join(root, 'track1.lrcembed.1234.tmp.mp3'),
+      path.join(root, 'track2.lrcembed.5678.tmp.flac'),
+      path.join(root, 'nested', 'track3.lrcembed.99999.tmp.mp3')
+    ]
+
+    for (const file of [...audioFiles, ...tempFiles]) {
+      await writeFile(file)
+    }
+
+    const found = await walkAudioFiles(root)
+    expect(found.sort()).toEqual(audioFiles.sort())
+    for (const tempFile of tempFiles) {
+      expect(found).not.toContain(tempFile)
+    }
+  })
+
+  it('does not exclude unrelated .tmp files with non-audio extensions', async () => {
+    const root = await makeTempDir()
+    const audioFiles = [path.join(root, 'track.mp3')]
+    // These have non-audio extensions so they won't be included anyway
+    const unrelatedTemp = [path.join(root, 'track.tmp.txt'), path.join(root, 'song.lrcembed.txt')]
+
+    for (const file of [...audioFiles, ...unrelatedTemp]) {
+      await writeFile(file)
+    }
+
+    const found = await walkAudioFiles(root)
+    expect(found.sort()).toEqual(audioFiles.sort())
+    for (const tempFile of unrelatedTemp) {
+      expect(found).not.toContain(tempFile)
+    }
+  })
+
+  it('includes audio files with .tmp in name but valid audio extension', async () => {
+    const root = await makeTempDir()
+    const audioFiles = [
+      path.join(root, 'track.mp3'),
+      path.join(root, 'track.tmp.mp3')  // Valid audio extension, should be included
+    ]
+    const tempFiles = [
+      path.join(root, 'track.lrcembed.1234.tmp.mp3')  // Should be excluded
+    ]
+
+    for (const file of [...audioFiles, ...tempFiles]) {
+      await writeFile(file)
+    }
+
+    const found = await walkAudioFiles(root)
+    expect(found.sort()).toEqual(audioFiles.sort())
+    for (const tempFile of tempFiles) {
+      expect(found).not.toContain(tempFile)
+    }
+  })
+})

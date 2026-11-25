@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 
 /**
@@ -17,4 +18,28 @@ export function normalizePathKey(filePath: string): string {
  */
 export function computeTrackId(filePath: string): string {
   return crypto.createHash('sha256').update(normalizePathKey(filePath)).digest('hex').slice(0, 32)
+}
+
+/**
+ * Validates a trackId against the expected 32-char lowercase hex format.
+ * This prevents traversal and injection via malformed track IDs.
+ */
+export function isValidTrackId(trackId: string): boolean {
+  return /^[0-9a-f]{32}$/.test(trackId)
+}
+
+/**
+ * Resolves a path to its real path (following symlinks) for containment checks.
+ * Returns the real absolute path, or throws if the path does not exist.
+ */
+export async function resolveRealPath(filePath: string): Promise<string> {
+  const absolute = path.resolve(filePath)
+  try {
+    return await fs.realpath(absolute)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Path does not exist: ${absolute}`)
+    }
+    throw error
+  }
 }

@@ -7,6 +7,7 @@ import {
   isPathWithinRoots,
   validateAudioPathInRoots
 } from '../src/main/utils/pathContainment'
+import { isValidTrackId } from '../src/main/utils/trackId'
 
 const tempDirs: string[] = []
 
@@ -76,5 +77,51 @@ describe.skipIf(process.platform !== 'win32')('Windows containment semantics', (
   it('rejects .. traversal after normalization', () => {
     expect(isPathWithinRoots('C:\\Music\\..\\Windows\\System32\\x.mp3', ['C:\\Music'])).toBe(false)
     expect(isPathWithinRoots('C:\\Music\\Sub\\..\\..\\escape.mp3', ['C:\\Music'])).toBe(false)
+  })
+})
+
+describe('trackId validation', () => {
+  it('accepts valid 32-char lowercase hex trackIds', () => {
+    expect(isValidTrackId('a'.repeat(32))).toBe(true)
+    expect(isValidTrackId('0123456789abcdef0123456789abcdef')).toBe(true)
+    expect(isValidTrackId('ffffffffffffffffffffffffffffffff')).toBe(true)
+  })
+
+  it('rejects invalid trackIds (wrong length, uppercase, non-hex, traversal)', () => {
+    expect(isValidTrackId('')).toBe(false)
+    expect(isValidTrackId('a'.repeat(31))).toBe(false)
+    expect(isValidTrackId('a'.repeat(33))).toBe(false)
+    expect(isValidTrackId('A'.repeat(32))).toBe(false)
+    expect(isValidTrackId('g'.repeat(32))).toBe(false)
+    expect(isValidTrackId('0123456789abcdef0123456789abcde/')).toBe(false)
+    expect(isValidTrackId('../etc/passwd')).toBe(false)
+    expect(isValidTrackId('0123456789abcdef0123456789abcdef\n')).toBe(false)
+  })
+})
+
+describe('symlink and empty-roots containment rejection', () => {
+  it('rejects symlink escapes outside roots when resolved', async () => {
+    const root = await makeTempDir()
+    const outside = await makeTempDir()
+    await fs.writeFile(path.join(root, 'inside.mp3'), 'x')
+    await fs.writeFile(path.join(outside, 'outside.mp3'), 'x')
+
+    const linkPath = path.join(root, 'linked.mp3')
+    try {
+      await fs.symlink(path.join(outside, 'outside.mp3'), linkPath)
+    } catch {
+      // Symlinks may not be available in test environment
+      return
+    }
+
+    // The symlink target is outside the root - containment check should reject
+    // when the real path is resolved
+    const realLinkPath = await fs.realpath(linkPath)
+    expect(isPathWithinRoots(realLinkPath, [root])).toBe(false)
+  })
+
+  it('rejects paths when roots array is empty', () => {
+    expect(isPathWithinRoots('/absolute/path/track.mp3', [])).toBe(false)
+    expect(() => validateAudioPathInRoots('/absolute/path/track.mp3', [], ['.mp3'])).toThrow('outside')
   })
 })

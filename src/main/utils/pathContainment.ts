@@ -12,10 +12,11 @@
  */
 
 import path from 'node:path'
+import { normalizePathKey } from './trackId'
 
+// Use unified canonical path normalization from trackId.ts
 function normalizeForComparison(filePath: string): string {
-  const resolved = path.resolve(filePath)
-  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+  return normalizePathKey(filePath)
 }
 
 /**
