@@ -52,6 +52,7 @@ import { createLrclibProvider } from './providers/lrclib'
 import { createLocalSidecarProvider, importLrcFile } from './providers/localSidecar'
 
 const MAX_LYRICS_BYTES = 1024 * 1024
+const MAX_QUERY_FIELD_CHARS = 512
 const WORKER_INIT_TIMEOUT_MS = 10_000
 const WORKER_RESTART_LIMIT = 3
 const UNLOAD_ACK_TIMEOUT_MS = 2000
@@ -394,14 +395,14 @@ function validateLyricsFetchRequest(payload: unknown): LyricsFetchRequest {
   if (!isValidTrackId(c.trackId)) {
     throw new Error('Invalid track id format')
   }
-  if (typeof c.title !== 'string') {
-    throw new Error('Lyrics fetch request must include title')
+  if (typeof c.title !== 'string' || c.title.length > MAX_QUERY_FIELD_CHARS) {
+    throw new Error(`Lyrics fetch request title must be a string <= ${MAX_QUERY_FIELD_CHARS} chars`)
   }
-  if (typeof c.artist !== 'string') {
-    throw new Error('Lyrics fetch request must include artist')
+  if (typeof c.artist !== 'string' || c.artist.length > MAX_QUERY_FIELD_CHARS) {
+    throw new Error(`Lyrics fetch request artist must be a string <= ${MAX_QUERY_FIELD_CHARS} chars`)
   }
-  if (typeof c.album !== 'string') {
-    throw new Error('Lyrics fetch request must include album')
+  if (typeof c.album !== 'string' || c.album.length > MAX_QUERY_FIELD_CHARS) {
+    throw new Error(`Lyrics fetch request album must be a string <= ${MAX_QUERY_FIELD_CHARS} chars`)
   }
   if (typeof c.durationSec !== 'number' || !Number.isFinite(c.durationSec) || c.durationSec < 0) {
     throw new Error('Lyrics fetch request must include non-negative numeric durationSec')
@@ -821,10 +822,11 @@ function registerIpcHandlers(): void {
     if (!selected) return null
     try {
       const lstat = await fs.lstat(selected)
-      if (!lstat.isSymbolicLink() && lstat.isFile()) {
-        const realPath = await resolveRealPath(selected)
-        authorizedDialogLrcPaths.add(normalizePathKey(realPath))
+      if (lstat.isSymbolicLink() || !lstat.isFile()) {
+        return null
       }
+      const realPath = await resolveRealPath(selected)
+      authorizedDialogLrcPaths.add(normalizePathKey(realPath))
     } catch {
       // Return null if the chosen file cannot be stat-ed cleanly
       return null

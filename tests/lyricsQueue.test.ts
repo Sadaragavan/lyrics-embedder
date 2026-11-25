@@ -64,8 +64,8 @@ describe('LyricsFetchQueue', () => {
     expect(result!.syncedLyrics).toBe('[00:01.00]Hello')
   })
 
-  it('picks the best score across providers', async () => {
-    const low = makeProvider('localSidecar', async () => makeCandidate('localSidecar', 5))
+  it('picks the best score across providers when localSidecar returns plain only', async () => {
+    const low = makeProvider('localSidecar', async () => makeCandidate('localSidecar', 6))
     const high = makeProvider('lrclib', async () =>
       makeCandidate('lrclib', 15, '[00:01.00]Best')
     )
@@ -75,6 +75,19 @@ describe('LyricsFetchQueue', () => {
     expect(result).not.toBeNull()
     expect(result!.providerId).toBe('lrclib')
     expect(result!.score).toBe(15)
+  })
+
+  it('short-circuits remaining providers when localSidecar finds synced lyrics', async () => {
+    const remoteFetch = vi.fn(async () => makeCandidate('lrclib', 15, '[00:01.00]Remote'))
+    const local = makeProvider('localSidecar', async () =>
+      makeCandidate('localSidecar', 100, '[00:01.00]Local synced')
+    )
+    const remote = makeProvider('lrclib', remoteFetch)
+    const queue = new LyricsFetchQueue({ providers: [local, remote] })
+
+    const result = await queue.fetch(makeQuery('a'.repeat(32)))
+    expect(result!.providerId).toBe('localSidecar')
+    expect(remoteFetch).not.toHaveBeenCalled()
   })
 
   it('filters and orders providers when query.providerIds is specified', async () => {
@@ -96,12 +109,36 @@ describe('LyricsFetchQueue', () => {
     expect(result!.providerId).toBe('lrclib')
   })
 
-  it('returns null when all providers return null', async () => {
+  it('returns null and emits done when all providers return null without error', async () => {
+    const onProgress = vi.fn()
     const provider = makeProvider('lrclib', async () => null)
-    const queue = new LyricsFetchQueue({ providers: [provider] })
+    const queue = new LyricsFetchQueue({ providers: [provider], onProgress })
 
     const result = await queue.fetch(makeQuery('c'.repeat(32)))
     expect(result).toBeNull()
+    const lastEvent = onProgress.mock.calls.at(-1)?.[0]
+    expect(lastEvent?.phase).toBe('done')
+  })
+
+  it('emits phase error when selected providers fail without a match', async () => {
+    const missLocal = makeProvider('localSidecar', async () => null)
+    const failingRemote = makeProvider('lrclib', async () => {
+      throw new Error('LRCLIB unavailable (HTTP 503)')
+    })
+    const onProgress = vi.fn()
+    const queue = new LyricsFetchQueue({
+      providers: [missLocal, failingRemote],
+      onProgress
+    })
+
+    const result = await queue.fetch(makeQuery('c'.repeat(32)))
+    expect(result).toBeNull()
+    const finalEvent = onProgress.mock.calls.at(-1)?.[0]
+    expect(finalEvent).toEqual({
+      trackId: 'c'.repeat(32),
+      phase: 'error',
+      error: 'LRCLIB unavailable (HTTP 503)'
+    })
   })
 
   it('handles provider errors gracefully and continues to fallback', async () => {
@@ -119,6 +156,7 @@ describe('LyricsFetchQueue', () => {
     expect(result!.providerId).toBe('localSidecar')
     const errorEvent = onProgress.mock.calls.find(([p]) => p.error !== undefined)
     expect(errorEvent).toBeDefined()
+    expect(onProgress.mock.calls.at(-1)?.[0]?.phase).toBe('done')
   })
 
   it('cancels an in-flight fetch immediately via AbortSignal', async () => {
@@ -161,11 +199,9 @@ describe('LyricsFetchQueue', () => {
     const p1 = queue.fetch(makeQuery(id1))
     const p2 = queue.fetch(makeQuery(id2))
 
-    // Cancel id2 while it is still pending behind id1
     queue.cancel(id2)
     expect(await p2).toBeNull()
 
-    // Release id1 and re-fetch id2; it must NOT stay stuck cancelled
     gate.resolve()
     await p1
     const refetched = await queue.fetch(makeQuery(id2))

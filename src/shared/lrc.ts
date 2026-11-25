@@ -3,12 +3,13 @@
  *
  * - Parses `[mm:ss.xx]`, `[mm:ss.xxx]`, `[mm:ss:xx]`, and `[mm:ss]` line-synced timestamps
  *   and `<mm:ss.xx>` A2 word tags.
- * - Bakes `[offset:±ms]` into line timestamps (and preserved word tags) and strips `[offset:]`.
+ * - Bakes `[offset:±ms]` using the standard LRC sign convention (`timeMs - offset`:
+ *   positive `[offset:+500]` shifts lyrics 500ms earlier, negative delays them) and strips `[offset:]`.
  * - Strips `[length:]` and metadata headers (Poweramp rejects duration mismatches).
  * - Rounds all timestamps to centiseconds (`[mm:ss.xx]`).
  * - Sorts lines by timestamp for stable output.
  * - `stackLrcLayers`: merges multiple LRC strings into same-timestamp stacking.
- * - `shiftLrcOffset`: shifts all timestamps by a delta in ms.
+ * - `shiftLrcOffset`: shifts all timestamps directly by `+ deltaMs` without premature clamping.
  *
  * This module must stay free of Node-only and DOM-only imports.
  */
@@ -103,23 +104,17 @@ function shiftWordTags(text: string, deltaMs: number): string {
   })
 }
 
-/**
- * Parses raw LRC text into sorted `LrcLine[]`.
- *
- * - Bakes `[offset:±ms]` into every timestamp (and preserved word tags) and strips the header.
- * - Strips `[length:]` and other metadata headers from output.
- * - Handles multiple timestamps per line (`[01:00.00][01:30.00]text`).
- * - Strips A2 `<mm:ss.xx>` word tags unless `preserveWordTags` is true.
- * - Sorts by timestamp (stable).
- */
-export function parseLrc(raw: string, options: ParseLrcOptions = {}): LrcLine[] {
+function parseLrcUnclamped(
+  raw: string,
+  options: ParseLrcOptions = {}
+): { lines: LrcLine[]; offset: number } {
   const { preserveWordTags = false } = options
   const cleanedRaw = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw
   const offset = extractOffset(cleanedRaw)
-  const lines = cleanedRaw.split(/\r?\n/)
-  const result: LrcLine[] = []
+  const rawLines = cleanedRaw.split(/\r?\n/)
+  const lines: LrcLine[] = []
 
-  for (const rawLine of lines) {
+  for (const rawLine of rawLines) {
     const trimmed = rawLine.trim()
     if (trimmed.length === 0) continue
     if (isMetadataLine(trimmed)) continue
@@ -131,23 +126,41 @@ export function parseLrc(raw: string, options: ParseLrcOptions = {}): LrcLine[] 
       const mm = match[1]!
       const ss = match[2]!
       const xx = match[3] ?? ''
-      timestamps.push(Math.max(0, parseTimestamp(mm, ss, xx) + offset))
+      // Standard LRC spec: +offset shifts playback earlier -> timestamp - offset
+      timestamps.push(parseTimestamp(mm, ss, xx) - offset)
       remaining = remaining.slice(match[0].length)
     }
 
     if (timestamps.length === 0) continue
 
-    const text = preserveWordTags
-      ? (offset !== 0 ? shiftWordTags(remaining.trim(), offset) : remaining.trim())
-      : stripWordTags(remaining)
+    const text = preserveWordTags ? remaining.trim() : stripWordTags(remaining)
 
     for (const timeMs of timestamps) {
-      result.push({ timeMs, text })
+      lines.push({ timeMs, text })
     }
   }
 
-  result.sort((a, b) => a.timeMs - b.timeMs)
-  return result
+  return { lines, offset }
+}
+
+/**
+ * Parses raw LRC text into sorted `LrcLine[]`.
+ *
+ * - Bakes `[offset:±ms]` (`timeMs - offset`) into timestamps and preserved word tags.
+ * - Strips `[length:]` and other metadata headers from output.
+ * - Handles multiple timestamps per line (`[01:00.00][01:30.00]text`).
+ * - Strips A2 `<mm:ss.xx>` word tags unless `preserveWordTags` is true.
+ * - Clamps negative timestamps to 0 and sorts stably by timestamp.
+ */
+export function parseLrc(raw: string, options: ParseLrcOptions = {}): LrcLine[] {
+  const { preserveWordTags = false } = options
+  const { lines, offset } = parseLrcUnclamped(raw, options)
+  const clamped = lines.map((line) => ({
+    timeMs: Math.max(0, line.timeMs),
+    text: preserveWordTags && offset !== 0 ? shiftWordTags(line.text, -offset) : line.text
+  }))
+  clamped.sort((a, b) => a.timeMs - b.timeMs)
+  return clamped
 }
 
 /**
@@ -189,15 +202,16 @@ export function stackLrcLayers(layers: string[], options: ParseLrcOptions & Form
 }
 
 /**
- * Shifts all timestamps by `deltaMs` milliseconds (positive = later, negative = earlier).
- * Timestamps are clamped to >= 0.
+ * Shifts all timestamps directly by `+ deltaMs` milliseconds (positive = later, negative = earlier)
+ * without premature clamping of baked `[offset:±ms]` intermediate values.
  */
 export function shiftLrcOffset(raw: string, deltaMs: number, options: ParseLrcOptions & FormatLrcOptions = {}): string {
   const { preserveWordTags = false } = options
-  const lines = parseLrc(raw, options)
+  const { lines, offset } = parseLrcUnclamped(raw, options)
+  const wordDelta = -offset + deltaMs
   const shifted = lines.map((line) => ({
     timeMs: Math.max(0, line.timeMs + deltaMs),
-    text: preserveWordTags && deltaMs !== 0 ? shiftWordTags(line.text, deltaMs) : line.text
+    text: preserveWordTags && wordDelta !== 0 ? shiftWordTags(line.text, wordDelta) : line.text
   }))
   shifted.sort((a, b) => a.timeMs - b.timeMs)
   return formatLrc(shifted, options)

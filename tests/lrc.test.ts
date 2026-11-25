@@ -92,13 +92,19 @@ describe('parseLrc', () => {
     expect(lines).toEqual([{ timeMs: 1_000, text: 'Hello' }])
   })
 
-  it('bakes [offset:±ms] into timestamps and clamps below 0', () => {
-    const raw = `[offset:-500]\n[00:00.20]Too early\n[00:01.00]Line`
+  it('bakes positive [offset:+ms] earlier (timeMs - offset) and clamps below 0', () => {
+    const raw = `[offset:+500]\n[00:00.20]Too early\n[00:01.00]Line`
     const lines = parseLrc(raw)
     expect(lines).toEqual([
       { timeMs: 0, text: 'Too early' },
       { timeMs: 500, text: 'Line' }
     ])
+  })
+
+  it('bakes negative [offset:-ms] later (timeMs + |offset|)', () => {
+    const raw = `[offset:-500]\n[00:01.00]Delayed`
+    const lines = parseLrc(raw)
+    expect(lines).toEqual([{ timeMs: 1_500, text: 'Delayed' }])
   })
 
   it('handles multiple timestamps per line', () => {
@@ -116,12 +122,12 @@ describe('parseLrc', () => {
     expect(lines[0]!.text).toBe('Hello world')
   })
 
-  it('preserves A2 word tags when option enabled and shifts them with offset', () => {
-    const raw = `[offset:500]\n[00:01.00]Hello <00:01.50>world`
+  it('preserves A2 word tags when option enabled and shifts them with [offset:] polarity', () => {
+    const raw = `[offset:+500]\n[00:01.00]Hello <00:01.50>world`
     const lines = parseLrc(raw, { preserveWordTags: true })
     expect(lines[0]).toEqual({
-      timeMs: 1_500,
-      text: 'Hello <00:02.00>world'
+      timeMs: 500,
+      text: 'Hello <00:01.00>world'
     })
   })
 
@@ -162,10 +168,10 @@ describe('normalizeLrc', () => {
     expect(normalizeLrc(raw)).toBe(raw)
   })
 
-  it('bakes offset, strips metadata and [length:], rounds centiseconds, and sorts', () => {
-    const raw = `[ti:Title]\n[ar:Artist]\n[length:3:00]\n[offset:1000]\n[00:05.555]Second\n[00:01.00]First`
+  it('bakes [offset:+1000] earlier, strips metadata and [length:], rounds centiseconds, and sorts', () => {
+    const raw = `[ti:Title]\n[ar:Artist]\n[length:3:00]\n[offset:1000]\n[00:05.555]Second\n[00:01.50]First`
     const result = normalizeLrc(raw)
-    expect(result).toBe('[00:02.00]First\n[00:06.56]Second')
+    expect(result).toBe('[00:00.50]First\n[00:04.56]Second')
   })
 })
 
@@ -189,7 +195,7 @@ describe('stackLrcLayers', () => {
 })
 
 describe('shiftLrcOffset', () => {
-  it('shifts timestamps by positive delta', () => {
+  it('shifts timestamps by positive delta (+deltaMs = later)', () => {
     const raw = `[00:01.00]Hello\n[00:05.00]World`
     const result = shiftLrcOffset(raw, 2_000)
     expect(result).toBe('[00:03.00]Hello\n[00:07.00]World')
@@ -199,6 +205,13 @@ describe('shiftLrcOffset', () => {
     const raw = `[00:01.00]Hello`
     const result = shiftLrcOffset(raw, -5_000)
     expect(result).toBe('[00:00.00]Hello')
+  })
+
+  it('does not prematurely clamp baked [offset:] before applying +deltaMs', () => {
+    const raw = `[offset:+1500]\n[00:01.00]Hello <00:01.20>world`
+    expect(shiftLrcOffset(raw, 1_000, { preserveWordTags: true })).toBe(
+      '[00:00.50]Hello <00:00.70>world'
+    )
   })
 
   it('shifts preserved A2 word tags when preserveWordTags is enabled', () => {

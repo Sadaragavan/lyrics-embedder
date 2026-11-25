@@ -1,7 +1,7 @@
 # Progress
 
 ## Current Phase
-Phase 3 complete (pure LRC parser/normalizer with `[offset:±ms]` baking, `[length:]` stripping, centisecond rounding, opt-in A2 preservation, `stackLrcLayers`, and `shiftLrcOffset`; sequential LRCLIB provider with pacing + `Retry-After`/backoff; sibling `.lrc` sidecar + dialog import helper; cancellable `LyricsFetchQueue` and IPC wiring). Ready to start Phase 4.
+Phase 4 desktop UI complete (Phase 3 audit fixes applied; pure selection/sync helpers; `@tanstack/react-virtual` library table with Shift/Ctrl selection; `<audio>` `media://` preview player with synchronous `onUnloadAudio` lock handshake; raw/stacked LRC editor with offset nudge, normalize, opt-in A2 toggle, LRCLIB/sidecar fetch, `.lrc` import, drafts, and sequential embed). Remaining: interactive desktop walkthrough and Poweramp Android hardware spot-check.
 
 ## Milestones
 - [x] Phase 0: Clean-slate workspace (`package.json`, `electron.vite.config.ts`, `tsconfig*.json`, `vitest.config.ts`, `electron-builder.yml`, `.gitignore`), dependencies installed (`electron@^45.4.1`, `taglib-wasm@^2.5.1`, Tailwind v4, Vitest, `@tanstack/react-virtual`), `electron-winstaller` install script denied, `taglib-wasi.wasm` verified on disk, multi-agent docs and handoff skill installed.
@@ -9,7 +9,8 @@ Phase 3 complete (pure LRC parser/normalizer with `[offset:±ms]` baking, `[leng
 - [x] Phase 2: Recursive folder scanner, atomic JSON `library-index.json` + draft store, HTTP 206 `media://` protocol with handle registry, and startup `*.lrcembed.*.tmp.*` sweep.
 - [x] Phase 2.5: Security and lock-safety hardening (`trackId` hex validation, `StreamRegistry` OS handle destruction + `'close'` await, `Cache-Control: no-store`, `JsonStore` write queue, `realpath`/empty-root containment, ref-counted `activeTargetDirs`, worker RPC timeouts, scanner temp exclusion).
 - [x] Phase 3: LRC parser/normalizer (`src/shared/lrc.ts`), `LyricsProvider` queue (LRCLIB + sibling `.lrc`), and stacked translation/romanization support.
-- [ ] Phase 4: Virtualized track table, `<audio>` timestamp preview/scrubber, lyric editor, and Poweramp Android hardware spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav`.
+- [x] Phase 4 (UI): Virtualized track table (`@tanstack/react-virtual`), `<audio>` timestamp preview/scrubber with `onUnloadAudio` handshake, and raw/stacked LRC editor + fetch/embed workflows.
+- [ ] Phase 4 (Verification): Interactive desktop walkthrough and Poweramp Android hardware spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav` + `.lrc`.
 
 ## Verified Technical Findings
 - `taglib-wasm@2.5.1` ships `dist/taglib-wasi.wasm` and `dist/taglib-web.wasm`, but `package.json` `exports` does not expose `./dist/taglib-wasi.wasm`. Dev mode must resolve `taglib-wasm` root via `fileURLToPath(import.meta.resolve('taglib-wasm'))` and join `'taglib-wasi.wasm'`.

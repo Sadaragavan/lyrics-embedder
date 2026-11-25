@@ -97,9 +97,13 @@ describe('LrclibProvider', () => {
     expect(result!.score).toBe(18)
   })
 
-  it('falls back to /api/search with ~400ms pacing when /api/get returns 404', async () => {
+  it('falls back to /api/search with ~400ms pacing after fetchFn completes on 404', async () => {
     vi.mocked(fetchFn)
-      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockImplementationOnce(async () => {
+        // Simulate 250ms HTTP latency; pacing must wait 400ms AFTER completion
+        fakeNow += 250
+        return new Response(null, { status: 404 })
+      })
       .mockResolvedValueOnce(
         jsonResponse([
           {
@@ -196,12 +200,26 @@ describe('LrclibProvider', () => {
     expect(sleepCalls).toEqual([1_250, 2_500])
   })
 
-  it('returns null on network error', async () => {
-    vi.mocked(fetchFn).mockRejectedValueOnce(new Error('Network down'))
-    vi.mocked(fetchFn).mockResolvedValueOnce(new Response(null, { status: 404 }))
+  it('throws on exhausted 429/503 retries without falling back to /api/search', async () => {
+    vi.mocked(fetchFn).mockImplementation(async () => new Response(null, { status: 429 }))
 
-    const result = await provider.fetch(makeQuery())
-    expect(result).toBeNull()
+    await expect(provider.fetch(makeQuery())).rejects.toThrow(/429/)
+    // 1 initial + 3 retries = 4 calls; must NOT invoke /api/search after exhaustion
+    expect(vi.mocked(fetchFn)).toHaveBeenCalledTimes(4)
+  })
+
+  it('throws on network error without falling back to /api/search', async () => {
+    vi.mocked(fetchFn).mockRejectedValueOnce(new Error('Network down'))
+
+    await expect(provider.fetch(makeQuery())).rejects.toThrow('Network down')
+    expect(vi.mocked(fetchFn)).toHaveBeenCalledTimes(1)
+  })
+
+  it('throws on non-404 HTTP error without falling back to /api/search', async () => {
+    vi.mocked(fetchFn).mockResolvedValueOnce(new Response(null, { status: 500 }))
+
+    await expect(provider.fetch(makeQuery())).rejects.toThrow(/HTTP 500/)
+    expect(vi.mocked(fetchFn)).toHaveBeenCalledTimes(1)
   })
 
   it('enforces sequential concurrency = 1 across concurrent fetch calls', async () => {

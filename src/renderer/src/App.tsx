@@ -1,201 +1,689 @@
-import { useEffect, useState } from 'react'
-import { CheckCircle2, FileAudio, RefreshCw, Save, TerminalSquare, AlertCircle } from 'lucide-react'
-import type { EmbedLyricsResult, TagEngineHealth, TrackMetadata } from '@shared/ipc'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AlertCircle, CheckCircle2, X } from 'lucide-react'
+import type {
+  LibraryRoot,
+  LyricsCandidate,
+  LyricsFetchProgress,
+  LyricsFetchRequest,
+  ScanProgress,
+  TagEngineHealth,
+  TrackRecord
+} from '@shared/ipc'
+import { parseLrc } from '@shared/lrc'
+import { findActiveLineIndex } from '@shared/lyricsSync'
+import {
+  applyTrackClick,
+  clearSelection,
+  createEmptySelectionState,
+  filterTracks,
+  reconcileSelection,
+  selectAllVisible,
+  type SelectionClickModifiers,
+  type TrackLyricsFilter,
+  type TrackSelectionState
+} from '@shared/trackSelection'
+import { AudioPreviewPlayer } from './components/AudioPreviewPlayer'
+import { LibraryToolbar } from './components/LibraryToolbar'
+import { LyricsEditorPanel } from './components/LyricsEditorPanel'
+import { TrackTable } from './components/TrackTable'
+import type { SeekRequest, TrackEmbedStatus } from './types'
+
+function toFetchRequest(track: TrackRecord): LyricsFetchRequest {
+  return {
+    trackId: track.id,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    durationSec: track.durationSec,
+    filePath: track.filePath
+  }
+}
 
 export function App() {
   const [health, setHealth] = useState<TagEngineHealth | null>(null)
-  const [track, setTrack] = useState<TrackMetadata | null>(null)
-  const [draftLyrics, setDraftLyrics] = useState('')
-  const [statusMessage, setStatusMessage] = useState<string | null>(null)
-  const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
+  const [roots, setRoots] = useState<LibraryRoot[]>([])
+  const [tracks, setTracks] = useState<TrackRecord[]>([])
+  const [scanning, setScanning] = useState(false)
+  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null)
 
-  async function refreshHealth() {
-    setErrorMessage(null)
-    try {
-      const result = await window.api.getHealth()
-      setHealth(result)
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error))
+  const [activeRootFilter, setActiveRootFilter] = useState('')
+  const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState<TrackLyricsFilter>('all')
+
+  const [selection, setSelection] = useState<TrackSelectionState>(createEmptySelectionState)
+  const [draftTexts, setDraftTexts] = useState<Map<string, string>>(() => new Map())
+  const [draftTrackIds, setDraftTrackIds] = useState<Set<string>>(() => new Set())
+  const [dirtyTrackIds, setDirtyTrackIds] = useState<Set<string>>(() => new Set())
+  const [preserveWordTags, setPreserveWordTags] = useState(false)
+
+  const [fetchProgressMap, setFetchProgressMap] = useState<Map<string, LyricsFetchProgress>>(
+    () => new Map()
+  )
+  const [embedStatusMap, setEmbedStatusMap] = useState<Map<string, TrackEmbedStatus>>(
+    () => new Map()
+  )
+  const [embedding, setEmbedding] = useState(false)
+
+  const [loadedTrackId, setLoadedTrackId] = useState<string | null>(null)
+  const [playbackTimeMs, setPlaybackTimeMs] = useState(0)
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [seekRequest, setSeekRequest] = useState<SeekRequest | null>(null)
+
+  const [bannerError, setBannerError] = useState<string | null>(null)
+  const [bannerStatus, setBannerStatus] = useState<string | null>(null)
+
+  const tracksRef = useRef(tracks)
+  tracksRef.current = tracks
+  const draftTextsRef = useRef(draftTexts)
+  draftTextsRef.current = draftTexts
+
+  const filteredTracks = useMemo(
+    () =>
+      filterTracks(tracks, {
+        search,
+        status: statusFilter,
+        rootId: activeRootFilter || undefined,
+        draftTrackIds
+      }),
+    [tracks, search, statusFilter, activeRootFilter, draftTrackIds]
+  )
+
+  const visibleTrackIds = useMemo(
+    () => filteredTracks.map((track) => track.id),
+    [filteredTracks]
+  )
+
+  const focusedTrack = useMemo(
+    () => tracks.find((track) => track.id === selection.focusedId) ?? null,
+    [tracks, selection.focusedId]
+  )
+
+  const focusedLyricsText = useMemo(() => {
+    if (!focusedTrack) return ''
+    return draftTexts.get(focusedTrack.id) ?? focusedTrack.lyrics ?? ''
+  }, [focusedTrack, draftTexts])
+
+  const activeLineText = useMemo(() => {
+    if (!loadedTrackId) return null
+    const loadedTrack = tracks.find((t) => t.id === loadedTrackId)
+    const lyrics = draftTexts.get(loadedTrackId) ?? loadedTrack?.lyrics ?? ''
+    if (!lyrics) return null
+    const lines = parseLrc(lyrics, { preserveWordTags })
+    const idx = findActiveLineIndex(lines, playbackTimeMs)
+    return idx >= 0 ? (lines[idx]?.text || '(instrumental)') : null
+  }, [loadedTrackId, tracks, draftTexts, preserveWordTags, playbackTimeMs])
+
+  const activeFetchCount = useMemo(() => {
+    let count = 0
+    for (const progress of fetchProgressMap.values()) {
+      if (progress.phase === 'fetching') count++
     }
-  }
+    return count
+  }, [fetchProgressMap])
 
+  const applyFetchedCandidate = useCallback(
+    async (trackId: string, candidate: LyricsCandidate) => {
+      const text = candidate.syncedLyrics ?? candidate.plainLyrics
+      if (!text) return
+      try {
+        const draft = await window.api.saveDraft({ trackId, lyrics: text, status: 'pending' })
+        setDraftTexts((prev) => {
+          const next = new Map(prev)
+          next.set(trackId, text)
+          return next
+        })
+        setDraftTrackIds((prev) => {
+          const next = new Set(prev)
+          next.add(trackId)
+          return next
+        })
+        setDirtyTrackIds((prev) => {
+          const next = new Set(prev)
+          next.delete(trackId)
+          return next
+        })
+        setTracks((prev) =>
+          prev.map((track) => (track.id === trackId ? { ...track, draftId: draft.id } : track))
+        )
+      } catch (error) {
+        setBannerError(error instanceof Error ? error.message : String(error))
+      }
+    },
+    []
+  )
+
+  // Initial load + main-process event subscriptions
   useEffect(() => {
-    void refreshHealth()
-  }, [])
+    let active = true
+    void (async () => {
+      try {
+        const [initialHealth, initialRoots, initialTracks] = await Promise.all([
+          window.api.getHealth(),
+          window.api.getRoots(),
+          window.api.getTracks()
+        ])
+        if (!active) return
+        setHealth(initialHealth)
+        setRoots(initialRoots)
+        setTracks(initialTracks)
+        setDraftTrackIds(
+          new Set(initialTracks.filter((t) => Boolean(t.draftId)).map((t) => t.id))
+        )
+      } catch (error) {
+        if (active) {
+          setBannerError(error instanceof Error ? error.message : String(error))
+        }
+      }
+    })()
 
-  async function handleSelectFile() {
-    setErrorMessage(null)
-    setStatusMessage(null)
+    const unsubScanProgress = window.api.onScanProgress((progress) => {
+      setScanProgress(progress)
+      setScanning(progress.phase === 'scanning')
+    })
+
+    const unsubScanComplete = window.api.onScanComplete(async () => {
+      try {
+        const [nextRoots, nextTracks] = await Promise.all([
+          window.api.getRoots(),
+          window.api.getTracks()
+        ])
+        setRoots(nextRoots)
+        setTracks(nextTracks)
+        setDraftTrackIds(
+          new Set(nextTracks.filter((t) => Boolean(t.draftId)).map((t) => t.id))
+        )
+        setSelection((prev) =>
+          reconcileSelection(
+            prev,
+            nextTracks.map((t) => t.id)
+          )
+        )
+      } catch (error) {
+        setBannerError(error instanceof Error ? error.message : String(error))
+      } finally {
+        setScanning(false)
+      }
+    })
+
+    const unsubFetchProgress = window.api.onLyricsFetchProgress((progress) => {
+      setFetchProgressMap((prev) => {
+        const next = new Map(prev)
+        next.set(progress.trackId, progress)
+        return next
+      })
+      if (progress.phase === 'done' && progress.candidate) {
+        void applyFetchedCandidate(progress.trackId, progress.candidate)
+      }
+    })
+
+    return () => {
+      active = false
+      unsubScanProgress()
+      unsubScanComplete()
+      unsubFetchProgress()
+    }
+  }, [applyFetchedCandidate])
+
+  // Load persisted draft when focusing a track not yet cached in draftTexts
+  useEffect(() => {
+    const trackId = selection.focusedId
+    if (!trackId) return
+    if (draftTextsRef.current.has(trackId)) return
+    const track = tracksRef.current.find((t) => t.id === trackId)
+    if (!track?.draftId) return
+
+    let cancelled = false
+    void window.api
+      .getDraft(trackId)
+      .then((draft) => {
+        if (cancelled || !draft) return
+        setDraftTexts((prev) => {
+          if (prev.has(trackId)) return prev
+          const next = new Map(prev)
+          next.set(trackId, draft.lyrics)
+          return next
+        })
+      })
+      .catch(() => undefined)
+
+    return () => {
+      cancelled = true
+    }
+  }, [selection.focusedId])
+
+  async function handleAddRoot() {
+    setBannerError(null)
     try {
-      const filePath = await window.api.selectAudioFile()
-      if (!filePath) return
-      setBusy(true)
-      const metadata = await window.api.readTrackMetadata(filePath)
-      setTrack(metadata)
-      setDraftLyrics(metadata.lyrics ?? '')
-      setStatusMessage(`Loaded ${metadata.format} metadata (${metadata.lyricsSource})`)
+      const folder = await window.api.selectLibraryFolder()
+      if (!folder) return
+      const added = await window.api.addRoot({ path: folder })
+      setRoots(await window.api.getRoots())
+      setBannerStatus(`Added root "${added.name}". Scanning...`)
+      setScanning(true)
+      await window.api.scanLibrary({ rootId: added.id })
+      setBannerStatus(`Scanned "${added.name}".`)
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error))
-    } finally {
-      setBusy(false)
+      setScanning(false)
+      setBannerError(error instanceof Error ? error.message : String(error))
     }
   }
 
-  async function handleEmbed() {
-    if (!track) return
-    setBusy(true)
-    setErrorMessage(null)
-    setStatusMessage(null)
+  async function handleRemoveRoot(rootId: string) {
+    setBannerError(null)
     try {
-      const result: EmbedLyricsResult = await window.api.embedLyrics({
-        filePath: track.filePath,
-        lyrics: draftLyrics
-      })
-      const reloaded = await window.api.readTrackMetadata(track.filePath)
-      setTrack(reloaded)
-      setDraftLyrics(reloaded.lyrics ?? '')
-      setStatusMessage(
-        `Verified ${result.lyricsSource} write to ${result.targetPath}`
+      await window.api.removeRoot(rootId)
+      const [nextRoots, nextTracks] = await Promise.all([
+        window.api.getRoots(),
+        window.api.getTracks()
+      ])
+      setRoots(nextRoots)
+      setTracks(nextTracks)
+      if (activeRootFilter === rootId) setActiveRootFilter('')
+      setSelection((prev) =>
+        reconcileSelection(
+          prev,
+          nextTracks.map((t) => t.id)
+        )
+      )
+      setDraftTrackIds(
+        new Set(nextTracks.filter((t) => Boolean(t.draftId)).map((t) => t.id))
       )
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error))
+      setBannerError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function handleScan(rootId?: string) {
+    setBannerError(null)
+    setBannerStatus(null)
+    setScanning(true)
+    try {
+      const result = await window.api.scanLibrary(rootId ? { rootId } : undefined)
+      const [nextRoots, nextTracks] = await Promise.all([
+        window.api.getRoots(),
+        window.api.getTracks()
+      ])
+      setRoots(nextRoots)
+      setTracks(nextTracks)
+      setDraftTrackIds(
+        new Set(nextTracks.filter((t) => Boolean(t.draftId)).map((t) => t.id))
+      )
+      setSelection((prev) =>
+        reconcileSelection(
+          prev,
+          nextTracks.map((t) => t.id)
+        )
+      )
+      setBannerStatus(`Scan complete (${result.tracks.length} tracks indexed).`)
+    } catch (error) {
+      setBannerError(error instanceof Error ? error.message : String(error))
     } finally {
-      setBusy(false)
+      setScanning(false)
+    }
+  }
+
+  function handleRowClick(trackId: string, modifiers: SelectionClickModifiers) {
+    setSelection((prev) => applyTrackClick(prev, visibleTrackIds, trackId, modifiers))
+  }
+
+  function handleLyricsChange(nextLyrics: string) {
+    if (!focusedTrack) return
+    const trackId = focusedTrack.id
+    setDraftTexts((prev) => {
+      const next = new Map(prev)
+      next.set(trackId, nextLyrics)
+      return next
+    })
+    setDirtyTrackIds((prev) => {
+      const next = new Set(prev)
+      next.add(trackId)
+      return next
+    })
+  }
+
+  async function handleSaveDraft(trackId: string, lyrics: string) {
+    setBannerError(null)
+    try {
+      const draft = await window.api.saveDraft({ trackId, lyrics, status: 'pending' })
+      setDraftTexts((prev) => {
+        const next = new Map(prev)
+        next.set(trackId, lyrics)
+        return next
+      })
+      setDraftTrackIds((prev) => {
+        const next = new Set(prev)
+        next.add(trackId)
+        return next
+      })
+      setDirtyTrackIds((prev) => {
+        const next = new Set(prev)
+        next.delete(trackId)
+        return next
+      })
+      setTracks((prev) =>
+        prev.map((t) => (t.id === trackId ? { ...t, draftId: draft.id } : t))
+      )
+      setBannerStatus('Draft saved.')
+    } catch (error) {
+      setBannerError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function handleDiscardDraft(trackId: string) {
+    setBannerError(null)
+    try {
+      await window.api.deleteDraft(trackId)
+      const original = tracksRef.current.find((t) => t.id === trackId)?.lyrics ?? ''
+      setDraftTexts((prev) => {
+        const next = new Map(prev)
+        next.set(trackId, original)
+        return next
+      })
+      setDraftTrackIds((prev) => {
+        const next = new Set(prev)
+        next.delete(trackId)
+        return next
+      })
+      setDirtyTrackIds((prev) => {
+        const next = new Set(prev)
+        next.delete(trackId)
+        return next
+      })
+      setTracks((prev) =>
+        prev.map((t) => (t.id === trackId ? { ...t, draftId: undefined } : t))
+      )
+      setBannerStatus('Draft discarded.')
+    } catch (error) {
+      setBannerError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function handleImportLrc() {
+    if (!focusedTrack) return
+    setBannerError(null)
+    try {
+      const selected = await window.api.selectLrcFile()
+      if (!selected) return
+      const content = await window.api.lyricsImportFile(selected)
+      if (!content) {
+        setBannerError('Selected .lrc file was empty, symlinked, or exceeded 1 MiB.')
+        return
+      }
+      await handleSaveDraft(focusedTrack.id, content)
+      setBannerStatus(`Imported ${selected}`)
+    } catch (error) {
+      setBannerError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function handleFetchFocused() {
+    if (!focusedTrack) return
+    setBannerError(null)
+    try {
+      await window.api.lyricsFetch(toFetchRequest(focusedTrack))
+    } catch (error) {
+      setBannerError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function handleFetchSelected() {
+    const targets = filteredTracks.filter((track) => selection.selectedIds.has(track.id))
+    if (targets.length === 0) return
+    setBannerError(null)
+    setBannerStatus(`Fetching lyrics for ${targets.length} track(s)...`)
+    try {
+      await window.api.lyricsFetchBatch(targets.map(toFetchRequest))
+    } catch (error) {
+      setBannerError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function handleCancelActiveFetches() {
+    const ids: string[] = []
+    for (const [id, progress] of fetchProgressMap) {
+      if (progress.phase === 'fetching') ids.push(id)
+    }
+    await Promise.all(ids.map((id) => window.api.lyricsCancelFetch(id)))
+  }
+
+  async function embedSingleTrack(track: TrackRecord, payload: string): Promise<boolean> {
+    setEmbedStatusMap((prev) => {
+      const next = new Map(prev)
+      next.set(track.id, { phase: 'embedding' })
+      return next
+    })
+    try {
+      const result = await window.api.embedLyrics({
+        filePath: track.filePath,
+        lyrics: payload
+      })
+      const refreshed = await window.api.getTrack(track.id)
+      await window.api.deleteDraft(track.id)
+
+      setDraftTexts((prev) => {
+        const next = new Map(prev)
+        next.set(track.id, refreshed?.lyrics ?? payload)
+        return next
+      })
+      setDraftTrackIds((prev) => {
+        const next = new Set(prev)
+        next.delete(track.id)
+        return next
+      })
+      setDirtyTrackIds((prev) => {
+        const next = new Set(prev)
+        next.delete(track.id)
+        return next
+      })
+      if (refreshed) {
+        setTracks((prev) =>
+          prev.map((t) =>
+            t.id === track.id ? { ...refreshed, draftId: undefined } : t
+          )
+        )
+      }
+      setEmbedStatusMap((prev) => {
+        const next = new Map(prev)
+        next.set(track.id, {
+          phase: 'verified',
+          targetPath: result.targetPath,
+          lyricsSource: result.lyricsSource
+        })
+        return next
+      })
+      return true
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setEmbedStatusMap((prev) => {
+        const next = new Map(prev)
+        next.set(track.id, { phase: 'error', error: message })
+        return next
+      })
+      return false
+    }
+  }
+
+  async function handleEmbedFocused() {
+    if (!focusedTrack || embedding) return
+    setEmbedding(true)
+    setBannerError(null)
+    setBannerStatus(null)
+    try {
+      const ok = await embedSingleTrack(focusedTrack, focusedLyricsText)
+      if (ok) {
+        setBannerStatus(`Embedded lyrics for "${focusedTrack.title}".`)
+      } else {
+        setBannerError(`Failed to embed "${focusedTrack.title}".`)
+      }
+    } finally {
+      setEmbedding(false)
+    }
+  }
+
+  async function handleEmbedSelected() {
+    if (embedding) return
+    const targets = filteredTracks.filter((track) => selection.selectedIds.has(track.id))
+    if (targets.length === 0) return
+
+    setEmbedding(true)
+    setBannerError(null)
+    let succeeded = 0
+    let failed = 0
+    try {
+      for (const track of targets) {
+        let payload = draftTextsRef.current.get(track.id)
+        if (payload === undefined && track.draftId) {
+          const draft = await window.api.getDraft(track.id)
+          payload = draft?.lyrics
+        }
+        if (payload === undefined) {
+          payload = track.lyrics ?? ''
+        }
+        if (payload.length === 0 && track.lyrics === null) {
+          continue
+        }
+        const ok = await embedSingleTrack(track, payload)
+        if (ok) succeeded++
+        else failed++
+      }
+      setBannerStatus(
+        `Batch embed finished: ${succeeded} verified${failed > 0 ? `, ${failed} failed` : ''}.`
+      )
+    } finally {
+      setEmbedding(false)
     }
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 p-6">
-      <div className="mx-auto max-w-4xl space-y-6">
-        <header className="flex flex-wrap items-center justify-between gap-4 border-b border-zinc-800 pb-4">
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight text-zinc-50">
-              Poweramp LRC Embedder
-            </h1>
-            <p className="text-sm text-zinc-400">
-              Phase 1 WASI Tag Engine &amp; Isolated Utility Worker Shell
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void refreshHealth()}
-              className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800"
-            >
-              <RefreshCw className="h-4 w-4" />
-              Check Worker
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleSelectFile()}
-              disabled={busy || !health?.ready}
-              className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <FileAudio className="h-4 w-4" />
-              Inspect Audio File
-            </button>
-          </div>
-        </header>
+    <div className="flex h-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100">
+      <LibraryToolbar
+        health={health}
+        roots={roots}
+        activeRootFilter={activeRootFilter}
+        onActiveRootFilterChange={setActiveRootFilter}
+        tracksCount={tracks.length}
+        filteredCount={filteredTracks.length}
+        selectedCount={selection.selectedIds.size}
+        scanning={scanning}
+        scanProgress={scanProgress}
+        search={search}
+        onSearchChange={setSearch}
+        statusFilter={statusFilter}
+        onStatusFilterChange={setStatusFilter}
+        activeFetchCount={activeFetchCount}
+        embedding={embedding}
+        onAddRoot={() => void handleAddRoot()}
+        onRemoveRoot={(id) => void handleRemoveRoot(id)}
+        onScanAll={() => void handleScan()}
+        onScanRoot={(id) => void handleScan(id)}
+        onFetchSelected={() => void handleFetchSelected()}
+        onCancelActiveFetches={() => void handleCancelActiveFetches()}
+        onEmbedSelected={() => void handleEmbedSelected()}
+      />
 
-        <section className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-4">
-          <div className="mb-3 flex items-center gap-2 text-sm font-medium text-zinc-200">
-            <TerminalSquare className="h-4 w-4 text-emerald-400" />
-            UtilityProcess &amp; WASI Status
+      {(bannerError || bannerStatus) && (
+        <div
+          className={`flex shrink-0 items-center justify-between gap-2 border-b px-4 py-1.5 text-xs ${
+            bannerError
+              ? 'border-red-900/80 bg-red-950/60 text-red-200'
+              : 'border-emerald-900/80 bg-emerald-950/40 text-emerald-200'
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {bannerError ? (
+              <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-400" />
+            ) : (
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+            )}
+            <span className="truncate">{bannerError ?? bannerStatus}</span>
           </div>
-          {health ? (
-            <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
-              <div className="rounded-lg bg-zinc-950/70 p-3">
-                <dt className="text-xs uppercase tracking-wider text-zinc-500">Status</dt>
-                <dd className="mt-1 flex items-center gap-1.5 font-mono text-zinc-100">
-                  {health.ready ? (
-                    <>
-                      <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                      <span>Ready (PID {health.workerPid ?? 'unknown'})</span>
-                    </>
-                  ) : (
-                    <>
-                      <AlertCircle className="h-4 w-4 text-amber-400" />
-                      <span>{health.error ?? 'Not ready'}</span>
-                    </>
-                  )}
-                </dd>
-              </div>
-              <div className="rounded-lg bg-zinc-950/70 p-3">
-                <dt className="text-xs uppercase tracking-wider text-zinc-500">TagLib Version</dt>
-                <dd className="mt-1 font-mono text-zinc-100">
-                  {health.taglibVersion ?? 'Unavailable'}
-                </dd>
-              </div>
-              <div className="rounded-lg bg-zinc-950/70 p-3 sm:col-span-2">
-                <dt className="text-xs uppercase tracking-wider text-zinc-500">WASM Path</dt>
-                <dd className="mt-1 break-all font-mono text-xs text-zinc-300">
-                  {health.wasmPath ?? 'Unresolved'}
-                </dd>
-              </div>
-            </dl>
-          ) : (
-            <p className="text-sm text-zinc-400">Querying worker health...</p>
-          )}
-        </section>
+          <button
+            type="button"
+            aria-label="Dismiss message"
+            onClick={() => {
+              setBannerError(null)
+              setBannerStatus(null)
+            }}
+            className="text-zinc-400 hover:text-zinc-100"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
-        {errorMessage && (
-          <div className="flex items-start gap-2 rounded-lg border border-red-900/80 bg-red-950/50 p-3 text-sm text-red-200">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
-            <span>{errorMessage}</span>
-          </div>
-        )}
+      <main className="grid flex-1 min-h-0 grid-cols-12 gap-3 overflow-hidden p-3">
+        <div className="col-span-7 flex min-h-0 flex-col">
+          <TrackTable
+            tracks={filteredTracks}
+            selection={selection}
+            draftTrackIds={draftTrackIds}
+            fetchProgressMap={fetchProgressMap}
+            embedStatusMap={embedStatusMap}
+            loadedTrackId={loadedTrackId}
+            isPlaying={isPlaying}
+            onRowClick={handleRowClick}
+            onSelectAll={() =>
+              setSelection((prev) => selectAllVisible(visibleTrackIds, prev.focusedId))
+            }
+            onClearSelection={() =>
+              setSelection((prev) => clearSelection(prev.focusedId))
+            }
+          />
+        </div>
 
-        {statusMessage && (
-          <div className="flex items-start gap-2 rounded-lg border border-emerald-900/80 bg-emerald-950/40 p-3 text-sm text-emerald-200">
-            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
-            <span className="break-all">{statusMessage}</span>
-          </div>
-        )}
+        <div className="col-span-5 flex min-h-0 flex-col">
+          <LyricsEditorPanel
+            focusedTrack={focusedTrack}
+            selectedCount={selection.selectedIds.size}
+            lyricsText={focusedLyricsText}
+            hasDraft={
+              focusedTrack
+                ? Boolean(focusedTrack.draftId || draftTrackIds.has(focusedTrack.id))
+                : false
+            }
+            isDirty={focusedTrack ? dirtyTrackIds.has(focusedTrack.id) : false}
+            preserveWordTags={preserveWordTags}
+            onPreserveWordTagsChange={setPreserveWordTags}
+            onLyricsChange={handleLyricsChange}
+            fetchProgress={
+              focusedTrack ? fetchProgressMap.get(focusedTrack.id) : undefined
+            }
+            embedStatus={
+              focusedTrack ? embedStatusMap.get(focusedTrack.id) : undefined
+            }
+            workerReady={Boolean(health?.ready)}
+            loadedTrackId={loadedTrackId}
+            playbackTimeMs={playbackTimeMs}
+            onSeekToMs={(trackId, timeMs) =>
+              setSeekRequest({ trackId, timeMs, nonce: Date.now() + Math.random() })
+            }
+            onFetchFocused={() => void handleFetchFocused()}
+            onCancelFetchFocused={() => {
+              if (focusedTrack) void window.api.lyricsCancelFetch(focusedTrack.id)
+            }}
+            onImportLrc={() => void handleImportLrc()}
+            onSaveDraft={() => {
+              if (focusedTrack) void handleSaveDraft(focusedTrack.id, focusedLyricsText)
+            }}
+            onDiscardDraft={() => {
+              if (focusedTrack) void handleDiscardDraft(focusedTrack.id)
+            }}
+            onEmbedFocused={() => void handleEmbedFocused()}
+          />
+        </div>
+      </main>
 
-        {track && (
-          <section className="space-y-4 rounded-xl border border-zinc-800 bg-zinc-900/70 p-4">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div>
-                <h2 className="text-base font-semibold text-zinc-100">{track.title}</h2>
-                <p className="text-sm text-zinc-400">
-                  {[track.artist, track.album].filter(Boolean).join(' — ') || 'Unknown Artist'}
-                </p>
-                <p className="mt-1 break-all font-mono text-xs text-zinc-500">
-                  {track.filePath} · {track.format} · {track.durationSec}s · source:{' '}
-                  {track.lyricsSource}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => void handleEmbed()}
-                disabled={busy}
-                className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Save className="h-4 w-4" />
-                Embed Lyrics
-              </button>
-            </div>
-
-            <div>
-              <label
-                htmlFor="lyrics-editor"
-                className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-zinc-400"
-              >
-                Lyrics Payload
-              </label>
-              <textarea
-                id="lyrics-editor"
-                value={draftLyrics}
-                onChange={(event) => setDraftLyrics(event.target.value)}
-                rows={10}
-                placeholder="[00:00.00] Paste or edit synced LRC lines..."
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 p-3 font-mono text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500 focus:outline-none"
-              />
-            </div>
-          </section>
-        )}
-      </div>
+      <AudioPreviewPlayer
+        focusedTrack={focusedTrack}
+        activeLineText={activeLineText}
+        seekRequest={seekRequest}
+        onPlaybackChange={(nextLoadedId, nextTimeMs, nextPlaying) => {
+          setLoadedTrackId(nextLoadedId)
+          setPlaybackTimeMs(nextTimeMs)
+          setIsPlaying(nextPlaying)
+        }}
+        onPlayerError={(message) => setBannerError(message)}
+      />
     </div>
   )
 }

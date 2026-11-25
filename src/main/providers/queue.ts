@@ -2,7 +2,8 @@
  * Cancellable sequential lyrics fetch queue.
  *
  * Runs allowed providers in order for each track, emitting progress events.
- * Supports batch fetching, per-request provider filtering, and immediate
+ * Supports batch fetching, per-request provider filtering, short-circuiting
+ * on local synced sidecar matches, error phase reporting, and immediate
  * cancellation of pending or in-flight requests.
  */
 
@@ -55,7 +56,7 @@ export class LyricsFetchQueue {
 
   /**
    * Enqueues a single track for lyrics fetching.
-   * Returns the best candidate found, or null if none matched or cancelled.
+   * Returns the best candidate found, or null if none matched, failed, or cancelled.
    */
   fetch(query: LyricsQuery): Promise<LyricsCandidate | null> {
     if (this.disposed) {
@@ -163,6 +164,7 @@ export class LyricsFetchQueue {
         const selectedProviders = this.resolveProvidersForQuery(query)
         let best: LyricsCandidate | null = null
         let bestScore = -1
+        let lastError: string | undefined
 
         for (const provider of selectedProviders) {
           if (entry.cancelled || controller.signal.aborted) {
@@ -184,11 +186,16 @@ export class LyricsFetchQueue {
                 candidate
               })
             }
+            // Short-circuit remaining providers when a local synced sidecar is found.
+            if (provider.id === 'localSidecar' && candidate?.syncedLyrics) {
+              break
+            }
           } catch (error) {
             if (entry.cancelled || controller.signal.aborted) {
               break
             }
             const message = error instanceof Error ? error.message : String(error)
+            lastError = message
             this.emitProgress(query.trackId, 'fetching', {
               providerId: provider.id,
               error: message
@@ -200,6 +207,12 @@ export class LyricsFetchQueue {
 
         if (entry.cancelled || controller.signal.aborted) {
           this.emitProgress(query.trackId, 'cancelled')
+          resolve(null)
+          continue
+        }
+
+        if (best === null && lastError !== undefined) {
+          this.emitProgress(query.trackId, 'error', { error: lastError })
           resolve(null)
           continue
         }

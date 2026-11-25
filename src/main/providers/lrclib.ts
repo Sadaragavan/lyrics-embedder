@@ -1,11 +1,10 @@
 /**
  * LRCLIB lyrics provider.
  *
- * Sequential `concurrency = 1`, ~400ms pacing, custom `User-Agent`,
- * `/api/get` -> `/api/search` fallback, and `429`/`503` `Retry-After`
- * (seconds + HTTP-date) + jittered exponential backoff.
- *
- * Network calls, timer sleep, clock, and RNG can be injected for deterministic testing.
+ * Sequential `concurrency = 1`, ~400ms pacing (recorded in `finally` after each
+ * request completes), custom `User-Agent`, `/api/get` -> `/api/search` fallback
+ * strictly on 404/empty match, and `429`/`503` `Retry-After` (seconds + HTTP-date)
+ * + jittered exponential backoff. Throws on network failure or exhausted retries.
  */
 
 import type {
@@ -185,6 +184,11 @@ export class LrclibProvider implements LyricsProvider {
     return baseMs + Math.floor(this.randomFn() * baseMs * 0.5)
   }
 
+  /**
+   * Executes an HTTP GET with pacing and bounded retries.
+   * Returns `null` only for HTTP 404 (not found) or cancellation via `signal`.
+   * Throws on network failures, non-404 HTTP errors, and exhausted 429/503 retries.
+   */
   private async fetchWithRetry(url: string, signal?: AbortSignal): Promise<Response | null> {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (signal?.aborted) return null
@@ -194,7 +198,6 @@ export class LrclibProvider implements LyricsProvider {
         if (signal?.aborted) return null
       }
 
-      this.lastRequestTime = this.nowFn()
       let response: Response
       try {
         response = await this.fetchFn(url, {
@@ -205,8 +208,11 @@ export class LrclibProvider implements LyricsProvider {
           },
           ...(signal ? { signal } : {})
         })
-      } catch {
-        return null
+      } catch (error) {
+        if (signal?.aborted) return null
+        throw error instanceof Error ? error : new Error(String(error))
+      } finally {
+        this.lastRequestTime = this.nowFn()
       }
 
       if (response.status === 404) {
@@ -214,7 +220,11 @@ export class LrclibProvider implements LyricsProvider {
       }
 
       if (response.status === 429 || response.status === 503) {
-        if (attempt === MAX_RETRIES) return null
+        if (attempt === MAX_RETRIES) {
+          throw new Error(
+            `LRCLIB rate-limited/unavailable (HTTP ${response.status}) after ${MAX_RETRIES + 1} attempts`
+          )
+        }
         const retryAfterMs = parseRetryAfterMs(response.headers.get('Retry-After'), this.nowFn())
         const delay =
           retryAfterMs !== null
@@ -225,7 +235,7 @@ export class LrclibProvider implements LyricsProvider {
       }
 
       if (!response.ok) {
-        return null
+        throw new Error(`LRCLIB request failed (HTTP ${response.status})`)
       }
 
       return response
@@ -250,13 +260,9 @@ export class LrclibProvider implements LyricsProvider {
     const response = await this.fetchWithRetry(url, signal)
     if (!response) return null
 
-    try {
-      const data = (await response.json()) as LrclibGetResponse
-      if (!data.syncedLyrics && !data.plainLyrics) return null
-      return data
-    } catch {
-      return null
-    }
+    const data = (await response.json()) as LrclibGetResponse
+    if (!data.syncedLyrics && !data.plainLyrics) return null
+    return data
   }
 
   private async trySearch(
@@ -273,24 +279,20 @@ export class LrclibProvider implements LyricsProvider {
     const response = await this.fetchWithRetry(url, signal)
     if (!response) return null
 
-    try {
-      const data = (await response.json()) as LrclibGetResponse[]
-      if (!Array.isArray(data) || data.length === 0) return null
+    const data = (await response.json()) as LrclibGetResponse[]
+    if (!Array.isArray(data) || data.length === 0) return null
 
-      let best: LrclibGetResponse | null = null
-      let bestScore = -1
-      for (const result of data) {
-        if (!result.syncedLyrics && !result.plainLyrics) continue
-        const s = scoreLrclibResult(result, query)
-        if (s > bestScore) {
-          bestScore = s
-          best = result
-        }
+    let best: LrclibGetResponse | null = null
+    let bestScore = -1
+    for (const result of data) {
+      if (!result.syncedLyrics && !result.plainLyrics) continue
+      const s = scoreLrclibResult(result, query)
+      if (s > bestScore) {
+        bestScore = s
+        best = result
       }
-      return best
-    } catch {
-      return null
     }
+    return best
   }
 }
 
