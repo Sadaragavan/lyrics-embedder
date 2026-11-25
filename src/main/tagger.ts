@@ -10,7 +10,7 @@ import {
 } from '@shared/ipc'
 import { resolveTaglibWasmPath } from './wasmPath'
 
-const LRCEMBED_TMP_FILE_PATTERN = /^.+\.lrcembed\.[^/\\]+\.tmp\.[^/\\]+$/
+const LRCEMBED_TMP_FILE_PATTERN = /^.+\.lrcembed\.\d+\.tmp\.[^/\\]+$/
 const LOCK_RETRY_CODES = new Set(['EBUSY', 'EPERM', 'EACCES'])
 
 export interface RetryOptions {
@@ -129,14 +129,29 @@ export async function cleanupStaleTempFiles(
 
   for (const entry of entries) {
     const fullPath = path.join(dirPath, entry.name)
-    if (entry.isDirectory()) {
+
+    // Never follow symlinks: lstat identifies the link itself, so we skip it
+    // rather than recursing into (or deleting through) an unexpected target.
+    let stat
+    try {
+      stat = await fs.lstat(fullPath)
+    } catch {
+      continue
+    }
+
+    if (stat.isSymbolicLink()) {
+      continue
+    }
+
+    if (stat.isDirectory()) {
       if (options.recursive) {
         const nested = await cleanupStaleTempFiles(fullPath, options)
         removed.push(...nested)
       }
       continue
     }
-    if (entry.isFile() && isLrcEmbedTempFile(entry.name)) {
+
+    if (stat.isFile() && isLrcEmbedTempFile(entry.name)) {
       await fs.unlink(fullPath)
       removed.push(fullPath)
     }
