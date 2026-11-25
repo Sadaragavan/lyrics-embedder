@@ -1,40 +1,36 @@
 # Active Handoff
 
-- Updated: 2026-11-25 15:38 IST
-- Last agent: builder (opencode)
+- Updated: 2026-11-25 18:45 IST
+- Last agent: opencode-builder + manual-verify
 - Branch: main
-- Base commit: 50fa5c4
+- Base commit: 07c8bd2
 
 ## Current Goal
-Execute Phase 3: LRC parser/normalizer (`src/shared/lrc.ts`), `LyricsProvider` queue (LRCLIB + sibling `.lrc`), and stacked translation/romanization support.
+Execute Phase 3: pure LRC parser/normalizer (`src/shared/lrc.ts`), `LyricsProvider` queue (LRCLIB + local sidecar), IPC wiring, and Vitest suite.
 
 ## Completed Since Last Handoff
-- Implemented Phase 2: recursive folder scanner, atomic JSON `library-index.json` + per-track draft store (`src/main/store.ts`), HTTP 206 `media://` protocol with stream handle registry (`src/main/mediaProtocol.ts`), Windows path containment (`src/main/utils/pathContainment.ts`), deterministic trackId hashing (`src/main/utils/trackId.ts`), startup/pre-scan `*.lrcembed.*.tmp.*` sweep with symlink avoidance, tightened temp PID regex (`\\d+`), worker init timeout + auto-restart with crash temp sweep, and pre-embed renderer `<audio>` unload + stream abort handshake.
-- Added shared types: `TrackRecord`, `LyricDraft`, `LibraryRoot`, `ScanProgress`, `MediaUrl` in `src/shared/types.ts`.
-- Extended IPC contracts in `src/shared/ipc.ts`: library roots, scan, drafts, media URLs, audio unload handshake.
-- Added Vitest coverage: `tests/store.test.ts` (atomic writes, lock retry, draft CRUD), `tests/pathContainment.test.ts` (case-insensitive, cross-drive, sibling prefix bypass), `tests/mediaProtocol.test.ts` (200/206/416, range parsing, stream registry, abort), `tests/scanner.test.ts` (recursive scan, progress, extension filter, symlink skip). Total 46 tests passing.
+- Phase 2.5 hardening committed at `07c8bd2`: `trackId` hex validation, `StreamRegistry` OS handle destruction + `'close'` await + `Cache-Control: no-store`, `JsonStore` writeQueue + `draftId` preservation, `realpath`/empty-root containment, ref-counted `activeTargetDirs`, worker RPC timeouts, scanner temp exclusion, and SHA check updated to `:(exclude)docs/`.
 
 ## Verification Status
 - `npm run typecheck`: PASS (0 errors)
-- `npm test`: PASS (5 files, 46/46 tests)
-- `npm run build`: PASS (main, preload CJS, Tailwind v4 + React renderer)
-- `npm run build:unpack`: PASS (`electron-builder --dir`; packaged build verified)
-- `release\win-unpacked\Poweramp LRC Embedder.exe --smoke-test`: PASS (exit 0, `ready: true`, TagLib 2.5.1 / TagLib 2.3.2)
+- `npm test`: PASS (65/65 tests)
+- `npm run build`: PASS
+- `npm run build:unpack` + `--smoke-test`: PASS (exit 0, `ready: true`, TagLib 2.3.2)
 
 ## Exact Next Step
-1. Design `src/shared/lrc.ts`: line-synced `[mm:ss.xx]` parser, `[offset:±ms]` baking into timestamps, `[length:]` stripping, opt-in A2 word-tag preservation toggle, same-timestamp multi-line stacking for translations/romanization.
-2. Implement `LyricsProvider` interface in `src/shared/types.ts` and `src/main/providers/`: LRCLIB (sequential, 400ms pacing, custom User-Agent, Retry-After on 429/503) + local sibling `.lrc` import.
-3. Add provider queue in main process (concurrency = 1) with progress events to renderer.
-4. Extend renderer with lyric editor, virtualized track table, `<audio>` timestamp preview/scrubber.
+1. `src/shared/types.ts`: add `LyricsProviderId`, `LyricsQuery`, `LyricsCandidate`, `LyricsProvider`, `LyricsFetchPhase`, and `LyricsFetchProgress`.
+2. `src/shared/lrc.ts`: pure parser/normalizer with `[offset:±ms]` baking, `[length:]` stripping, centisecond rounding, opt-in A2 word-tag preservation (default strip), stable timestamp sort, `stackLrcLayers`, and `shiftLrcOffset`.
+3. `src/main/providers/lrclib.ts`: sequential `concurrency = 1` queue (~400ms pacing), custom `User-Agent`, `/api/get` -> `/api/search` fallback, and `429`/`503` `Retry-After` (seconds + HTTP-date) + jittered exponential backoff.
+4. `src/main/providers/localSidecar.ts` and `queue.ts`: sibling `.lrc` UTF-8/BOM reader (`<= 1 MiB`, symlink rejection), dialog `.lrc` import helper, and cancellable sequential `LyricsFetchQueue`.
+5. Wire IPC/preload (`lyrics:fetch`, `lyrics:fetchBatch`, `lyrics:cancelFetch`, `lyrics:fetchProgress`, `lyrics:importFile`) with `trackId`, root containment, and provider allow-list validation.
+6. Add `tests/{lrc,lrclib,localSidecar,lyricsQueue}.test.ts` and pass all 4 gates.
 
 ## Files in Scope
 - `src/shared/{types.ts,ipc.ts,lrc.ts}`
-- `src/main/{index.ts,audioWorker.ts,tagger.ts,store.ts,mediaProtocol.ts,scanner.ts,providers/}`
-- `src/main/utils/{pathContainment.ts,trackId.ts}`
+- `src/main/{index.ts,tagger.ts,providers/lrclib.ts,providers/localSidecar.ts,providers/queue.ts}`
 - `src/preload/index.ts`
-- `tests/`
+- `tests/{lrc,lrclib,localSidecar,lyricsQueue}.test.ts`
 
 ## Constraints / Open Blockers
-- None. Keep `taglib-wasm` writes sequential (`concurrency = 1`) and close active `media://` streams + renderer `<audio>` src before embedding.
-- Provider implementations must be pure TypeScript (no native addons).
-- LRCLIB rate limits: respect `Retry-After` header, implement exponential backoff with jitter.
+- Leftover Phase 2.5 nit: wrap `fs.unlink` in `src/main/tagger.ts:155` (`cleanupStaleTempFiles`) with `ENOENT` tolerance and lock-error retry/skip so one locked temp file does not abort the sweep.
+- Confirm `app.whenReady().then(...)` in `src/main/index.ts:746` has a `.catch()` handler so startup store corruption fails visibly.
