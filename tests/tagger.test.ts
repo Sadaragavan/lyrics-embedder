@@ -328,4 +328,43 @@ describe('AudioTagger WASI round-trip & Windows safety', () => {
       expect(stat.isFile()).toBe(true)
     }
   })
+
+  it('tolerates ENOENT and retries/skips locked temp files during sweep without aborting', async () => {
+    const dir = await createTempDir()
+    const missingTmp = path.join(dir, 'a-missing.lrcembed.1.tmp.mp3')
+    const transientLockTmp = path.join(dir, 'b-transient.lrcembed.2.tmp.flac')
+    const persistentLockTmp = path.join(dir, 'c-locked.lrcembed.3.tmp.m4a')
+    const cleanTmp = path.join(dir, 'd-clean.lrcembed.4.tmp.opus')
+
+    for (const file of [missingTmp, transientLockTmp, persistentLockTmp, cleanTmp]) {
+      await fs.writeFile(file, 'placeholder', 'utf8')
+    }
+
+    const transientAttempts = new Map<string, number>()
+    const removed = await cleanupStaleTempFiles(dir, {
+      recursive: false,
+      retryOptions: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 5 },
+      unlink: async (target) => {
+        if (target === missingTmp) {
+          throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+        }
+        if (target === transientLockTmp) {
+          const count = (transientAttempts.get(target) ?? 0) + 1
+          transientAttempts.set(target, count)
+          if (count < 2) {
+            throw Object.assign(new Error('busy'), { code: 'EBUSY' })
+          }
+        }
+        if (target === persistentLockTmp) {
+          throw Object.assign(new Error('locked'), { code: 'EPERM' })
+        }
+        await fs.unlink(target)
+      }
+    })
+
+    expect(removed.sort()).toEqual([transientLockTmp, cleanTmp].sort())
+    await expect(fs.stat(cleanTmp)).rejects.toThrow()
+    await expect(fs.stat(transientLockTmp)).rejects.toThrow()
+    expect((await fs.stat(persistentLockTmp)).isFile()).toBe(true)
+  })
 })

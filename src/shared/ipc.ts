@@ -2,6 +2,9 @@ import type {
   DraftStatus,
   LibraryRoot,
   LyricDraft,
+  LyricsCandidate,
+  LyricsFetchProgress,
+  LyricsProviderId,
   MediaUnloadRequest,
   MediaUrl,
   ScanProgress,
@@ -14,6 +17,12 @@ export {
   type LibraryIndex,
   type LibraryRoot,
   type LyricDraft,
+  type LyricsCandidate,
+  type LyricsFetchPhase,
+  type LyricsFetchProgress,
+  type LyricsProvider,
+  type LyricsProviderId,
+  type LyricsQuery,
   type LyricsSource,
   type MediaUnloadAck,
   type MediaUnloadRequest,
@@ -77,10 +86,24 @@ export interface SaveDraftRequest {
   status?: DraftStatus
 }
 
+/** Allowed provider IDs for the fetch request (security: allow-list validation). */
+export const ALLOWED_PROVIDER_IDS: readonly LyricsProviderId[] = ['lrclib', 'localSidecar']
+
+export interface LyricsFetchRequest {
+  trackId: string
+  title: string
+  artist: string
+  album: string
+  durationSec: number
+  filePath: string
+  providerIds?: LyricsProviderId[]
+}
+
 export const IPC_CHANNELS = {
   getHealth: 'tagEngine:getHealth',
   selectAudioFile: 'dialog:selectAudioFile',
   selectLibraryFolder: 'dialog:selectLibraryFolder',
+  selectLrcFile: 'dialog:selectLrcFile',
   readTrackMetadata: 'track:readMetadata',
   embedLyrics: 'track:embedLyrics',
   getRoots: 'library:getRoots',
@@ -96,7 +119,12 @@ export const IPC_CHANNELS = {
   deleteDraft: 'draft:delete',
   getMediaUrl: 'media:getUrl',
   unloadAudio: 'media:unloadAudio',
-  acknowledgeUnload: 'media:acknowledgeUnload'
+  acknowledgeUnload: 'media:acknowledgeUnload',
+  lyricsFetch: 'lyrics:fetch',
+  lyricsFetchBatch: 'lyrics:fetchBatch',
+  lyricsCancelFetch: 'lyrics:cancelFetch',
+  lyricsFetchProgress: 'lyrics:fetchProgress',
+  lyricsImportFile: 'lyrics:importFile'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]
@@ -105,6 +133,7 @@ export interface ElectronApi {
   getHealth: () => Promise<TagEngineHealth>
   selectAudioFile: () => Promise<string | null>
   selectLibraryFolder: () => Promise<string | null>
+  selectLrcFile: () => Promise<string | null>
   readTrackMetadata: (filePath: string) => Promise<TrackMetadata>
   embedLyrics: (request: EmbedLyricsRequest) => Promise<EmbedLyricsResult>
   getRoots: () => Promise<LibraryRoot[]>
@@ -117,9 +146,14 @@ export interface ElectronApi {
   getDraft: (trackId: string) => Promise<LyricDraft | null>
   deleteDraft: (trackId: string) => Promise<boolean>
   getMediaUrl: (trackId: string) => Promise<MediaUrl>
+  lyricsFetch: (query: LyricsFetchRequest) => Promise<LyricsCandidate | null>
+  lyricsFetchBatch: (queries: LyricsFetchRequest[]) => Promise<(LyricsCandidate | null)[]>
+  lyricsCancelFetch: (trackId: string) => Promise<void>
+  lyricsImportFile: (filePath: string) => Promise<string | null>
   onScanProgress: (listener: (progress: ScanProgress) => void) => () => void
   onScanComplete: (listener: (result: ScanLibraryResult) => void) => () => void
   onUnloadAudio: (listener: (request: MediaUnloadRequest) => void) => () => void
+  onLyricsFetchProgress: (listener: (progress: LyricsFetchProgress) => void) => () => void
 }
 
 export type WorkerPayload =

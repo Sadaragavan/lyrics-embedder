@@ -114,9 +114,15 @@ export async function retryOnLockError<T>(
  */
 export async function cleanupStaleTempFiles(
   dirPath: string,
-  options: { recursive?: boolean } = {}
+  options: {
+    recursive?: boolean
+    unlink?: (filePath: string) => Promise<void>
+    retryOptions?: RetryOptions
+  } = {}
 ): Promise<string[]> {
   const removed: string[] = []
+  const unlinkFn = options.unlink ?? ((target: string) => fs.unlink(target))
+  const retryOpts = options.retryOptions ?? { maxAttempts: 3, baseDelayMs: 20, maxDelayMs: 100 }
   let entries
   try {
     entries = await fs.readdir(dirPath, { withFileTypes: true })
@@ -152,8 +158,21 @@ export async function cleanupStaleTempFiles(
     }
 
     if (stat.isFile() && isLrcEmbedTempFile(entry.name)) {
-      await fs.unlink(fullPath)
-      removed.push(fullPath)
+      try {
+        await retryOnLockError(() => unlinkFn(fullPath), retryOpts)
+        removed.push(fullPath)
+      } catch (unlinkError) {
+        if ((unlinkError as NodeJS.ErrnoException).code === 'ENOENT') {
+          // File was already removed between readdir and unlink; safe to ignore.
+          continue
+        }
+        if (isLockError(unlinkError)) {
+          // File remained locked after retries; skip rather than aborting the sweep.
+          console.warn(`[tagger] skipping locked temp file: ${fullPath}`)
+          continue
+        }
+        throw unlinkError
+      }
     }
   }
 

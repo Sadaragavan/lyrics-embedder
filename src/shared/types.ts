@@ -80,3 +80,40 @@ export interface MediaUnloadAck {
   requestId: string
   acknowledgedAt: string
 }
+
+// --- Phase 3: Provider / Lyrics Fetch types ---
+
+export type LyricsProviderId = 'lrclib' | 'localSidecar'
+
+export interface LyricsQuery {
+  trackId: string
+  title: string
+  artist: string
+  album: string
+  durationSec: number
+  filePath: string
+  providerIds?: LyricsProviderId[]
+}
+
+export interface LyricsCandidate {
+  providerId: LyricsProviderId
+  syncedLyrics: string | null
+  plainLyrics: string | null
+  score: number
+}
+
+export interface LyricsProvider {
+  id: LyricsProviderId
+  displayName: string
+  fetch(query: LyricsQuery, signal?: AbortSignal): Promise<LyricsCandidate | null>
+}
+
+export type LyricsFetchPhase = 'idle' | 'fetching' | 'done' | 'error' | 'cancelled'
+
+export interface LyricsFetchProgress {
+  trackId: string
+  phase: LyricsFetchPhase
+  providerId?: LyricsProviderId
+  candidate?: LyricsCandidate
+  error?: string
+}

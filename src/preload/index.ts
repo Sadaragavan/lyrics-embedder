@@ -4,6 +4,8 @@ import {
   type AddLibraryRootRequest,
   type ElectronApi,
   type EmbedLyricsRequest,
+  type LyricsFetchProgress,
+  type LyricsFetchRequest,
   type MediaUnloadAck,
   type MediaUnloadRequest,
   type SaveDraftRequest,
@@ -24,6 +26,7 @@ const api: ElectronApi = {
   getHealth: () => ipcRenderer.invoke(IPC_CHANNELS.getHealth),
   selectAudioFile: () => ipcRenderer.invoke(IPC_CHANNELS.selectAudioFile),
   selectLibraryFolder: () => ipcRenderer.invoke(IPC_CHANNELS.selectLibraryFolder),
+  selectLrcFile: () => ipcRenderer.invoke(IPC_CHANNELS.selectLrcFile),
   readTrackMetadata: (filePath: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.readTrackMetadata, filePath),
   embedLyrics: (request: EmbedLyricsRequest) =>
@@ -41,6 +44,14 @@ const api: ElectronApi = {
   getDraft: (trackId: string) => ipcRenderer.invoke(IPC_CHANNELS.getDraft, trackId),
   deleteDraft: (trackId: string) => ipcRenderer.invoke(IPC_CHANNELS.deleteDraft, trackId),
   getMediaUrl: (trackId: string) => ipcRenderer.invoke(IPC_CHANNELS.getMediaUrl, trackId),
+  lyricsFetch: (query: LyricsFetchRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.lyricsFetch, query),
+  lyricsFetchBatch: (queries: LyricsFetchRequest[]) =>
+    ipcRenderer.invoke(IPC_CHANNELS.lyricsFetchBatch, queries),
+  lyricsCancelFetch: (trackId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.lyricsCancelFetch, trackId),
+  lyricsImportFile: (filePath: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.lyricsImportFile, filePath),
   onScanProgress: (listener) => subscribe(IPC_CHANNELS.scanProgress, listener),
   onScanComplete: (listener) => subscribe(IPC_CHANNELS.scanComplete, listener),
   onUnloadAudio: (listener) => {
@@ -59,7 +70,9 @@ const api: ElectronApi = {
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.unloadAudio, handler)
     }
-  }
+  },
+  onLyricsFetchProgress: (listener) =>
+    subscribe<LyricsFetchProgress>(IPC_CHANNELS.lyricsFetchProgress, listener)
 }
 
 contextBridge.exposeInMainWorld('api', api)

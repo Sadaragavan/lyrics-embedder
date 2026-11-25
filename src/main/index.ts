@@ -13,11 +13,14 @@ import {
 import {
   IPC_CHANNELS,
   SUPPORTED_AUDIO_EXTENSIONS,
+  ALLOWED_PROVIDER_IDS,
   isWorkerProgressMessage,
   type AddLibraryRootRequest,
   type EmbedLyricsRequest,
   type EmbedLyricsResult,
   type LibraryRoot,
+  type LyricsFetchRequest,
+  type LyricsProviderId,
   type MediaUnloadAck,
   type MediaUnloadRequest,
   type MediaUrl,
@@ -42,8 +45,11 @@ import {
 import { createStore, computeTrackId, type JsonStore } from './store'
 import { cleanupStaleTempFiles, isSupportedAudioPath } from './tagger'
 import { isPathWithinRoots } from './utils/pathContainment'
-import { isValidTrackId, resolveRealPath } from './utils/trackId'
+import { isValidTrackId, normalizePathKey, resolveRealPath } from './utils/trackId'
 import { resolveTaglibWasmPath } from './wasmPath'
+import { createLyricsFetchQueue, type LyricsFetchQueue } from './providers/queue'
+import { createLrclibProvider } from './providers/lrclib'
+import { createLocalSidecarProvider, importLrcFile } from './providers/localSidecar'
 
 const MAX_LYRICS_BYTES = 1024 * 1024
 const WORKER_INIT_TIMEOUT_MS = 10_000
@@ -74,6 +80,9 @@ let isQuitting = false
 // Ref-counted active target directories for temp sweep
 const activeTargetDirs = new Map<string, number>()
 let store: JsonStore | null = null
+let lyricsFetchQueue: LyricsFetchQueue | null = null
+// Tracks `.lrc` file real paths explicitly chosen by the user via native open dialog.
+const authorizedDialogLrcPaths = new Set<string>()
 
 let nextRequestId = 1
 const pendingRequests = new Map<number, PendingRequest>()
@@ -372,6 +381,107 @@ function validateSaveDraft(payload: unknown): SaveDraftRequest {
     lyrics: candidate.lyrics,
     ...(status === undefined ? {} : { status })
   }
+}
+
+function validateLyricsFetchRequest(payload: unknown): LyricsFetchRequest {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Invalid lyrics fetch request')
+  }
+  const c = payload as Record<string, unknown>
+  if (typeof c.trackId !== 'string' || c.trackId.length === 0) {
+    throw new Error('Lyrics fetch request must include trackId')
+  }
+  if (!isValidTrackId(c.trackId)) {
+    throw new Error('Invalid track id format')
+  }
+  if (typeof c.title !== 'string') {
+    throw new Error('Lyrics fetch request must include title')
+  }
+  if (typeof c.artist !== 'string') {
+    throw new Error('Lyrics fetch request must include artist')
+  }
+  if (typeof c.album !== 'string') {
+    throw new Error('Lyrics fetch request must include album')
+  }
+  if (typeof c.durationSec !== 'number' || !Number.isFinite(c.durationSec) || c.durationSec < 0) {
+    throw new Error('Lyrics fetch request must include non-negative numeric durationSec')
+  }
+  if (typeof c.filePath !== 'string' || c.filePath.length === 0 || c.filePath.includes('\0')) {
+    throw new Error('Lyrics fetch request must include valid filePath')
+  }
+
+  let providerIds: LyricsProviderId[] | undefined
+  if (c.providerIds !== undefined) {
+    if (!Array.isArray(c.providerIds) || c.providerIds.length === 0) {
+      throw new Error('providerIds must be a non-empty array when specified')
+    }
+    for (const pid of c.providerIds) {
+      if (typeof pid !== 'string' || !(ALLOWED_PROVIDER_IDS as readonly string[]).includes(pid)) {
+        throw new Error(`Invalid provider id: ${String(pid)}`)
+      }
+    }
+    providerIds = c.providerIds as LyricsProviderId[]
+  }
+
+  return {
+    trackId: c.trackId,
+    title: c.title,
+    artist: c.artist,
+    album: c.album,
+    durationSec: c.durationSec,
+    filePath: c.filePath,
+    ...(providerIds ? { providerIds } : {})
+  }
+}
+
+async function prepareAuthorizedLyricsFetch(rawPayload: unknown): Promise<LyricsFetchRequest> {
+  const request = validateLyricsFetchRequest(rawPayload)
+  const realPath = await validateAudioFilePath(request.filePath)
+
+  if (store) {
+    const existingTrack = await store.getTrack(request.trackId)
+    if (existingTrack && normalizePathKey(existingTrack.filePath) !== normalizePathKey(realPath)) {
+      throw new Error('Track ID does not match authorized track path')
+    }
+  }
+
+  return {
+    ...request,
+    filePath: realPath
+  }
+}
+
+async function validateLrcImportPath(rawFilePath: unknown): Promise<string> {
+  if (typeof rawFilePath !== 'string' || rawFilePath.length === 0 || rawFilePath.includes('\0')) {
+    throw new Error('Invalid file path')
+  }
+  if (!path.isAbsolute(rawFilePath)) {
+    throw new Error(`Path must be absolute: ${rawFilePath}`)
+  }
+  const normalized = path.resolve(rawFilePath)
+  if (path.extname(normalized).toLowerCase() !== '.lrc') {
+    throw new Error(`Unsupported lyrics file extension: ${rawFilePath}`)
+  }
+
+  const lstat = await fs.lstat(normalized)
+  if (lstat.isSymbolicLink()) {
+    throw new Error(`Symlink LRC paths are not allowed: ${normalized}`)
+  }
+  if (!lstat.isFile()) {
+    throw new Error(`Path is not a file: ${normalized}`)
+  }
+
+  const realPath = await resolveRealPath(normalized)
+  const roots = store ? await store.getRoots() : []
+  const withinRoots =
+    roots.length > 0 && isPathWithinRoots(realPath, roots.map((root) => root.path))
+  const selectedViaDialog = authorizedDialogLrcPaths.has(normalizePathKey(realPath))
+
+  if (!withinRoots && !selectedViaDialog) {
+    throw new Error(`Path is outside authorized library roots: ${realPath}`)
+  }
+
+  return realPath
 }
 
 function requestRendererUnload(filePath: string): Promise<void> {
@@ -694,6 +804,79 @@ function registerIpcHandlers(): void {
     pendingUnloads.delete(ack.requestId)
     resolve()
   })
+
+  // --- Lyrics provider IPC handlers ---
+
+  ipcMain.handle(IPC_CHANNELS.selectLrcFile, async (): Promise<string | null> => {
+    const dialogOptions: Electron.OpenDialogOptions = {
+      title: 'Import LRC File',
+      properties: ['openFile'],
+      filters: [{ name: 'LRC Files', extensions: ['lrc'] }]
+    }
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions)
+    if (result.canceled || result.filePaths.length === 0) return null
+    const selected = result.filePaths[0]
+    if (!selected) return null
+    try {
+      const lstat = await fs.lstat(selected)
+      if (!lstat.isSymbolicLink() && lstat.isFile()) {
+        const realPath = await resolveRealPath(selected)
+        authorizedDialogLrcPaths.add(normalizePathKey(realPath))
+      }
+    } catch {
+      // Return null if the chosen file cannot be stat-ed cleanly
+      return null
+    }
+    return selected
+  })
+
+  ipcMain.handle(
+    IPC_CHANNELS.lyricsFetch,
+    async (_event, rawPayload: unknown) => {
+      if (!lyricsFetchQueue) {
+        throw new Error('Lyrics fetch queue not initialized')
+      }
+      const request = await prepareAuthorizedLyricsFetch(rawPayload)
+      return lyricsFetchQueue.fetch(request)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.lyricsFetchBatch,
+    async (_event, rawPayload: unknown) => {
+      if (!Array.isArray(rawPayload)) {
+        throw new Error('Batch fetch payload must be an array')
+      }
+      if (!lyricsFetchQueue) {
+        throw new Error('Lyrics fetch queue not initialized')
+      }
+      const queries = await Promise.all(rawPayload.map(prepareAuthorizedLyricsFetch))
+      return lyricsFetchQueue.fetchBatch(queries)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.lyricsCancelFetch,
+    async (_event, rawTrackId: unknown): Promise<void> => {
+      if (typeof rawTrackId !== 'string' || rawTrackId.length === 0) {
+        throw new Error('Invalid track id for cancel')
+      }
+      if (!isValidTrackId(rawTrackId)) {
+        throw new Error('Invalid track id format')
+      }
+      lyricsFetchQueue?.cancel(rawTrackId)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.lyricsImportFile,
+    async (_event, rawFilePath: unknown): Promise<string | null> => {
+      const realPath = await validateLrcImportPath(rawFilePath)
+      return importLrcFile(realPath)
+    }
+  )
 }
 
 async function createMainWindow(): Promise<void> {
@@ -743,10 +926,23 @@ async function initializePersistence(): Promise<void> {
   }
 }
 
+function initializeLyricsFetchQueue(): void {
+  lyricsFetchQueue = createLyricsFetchQueue({
+    providers: [
+      createLocalSidecarProvider(),
+      createLrclibProvider()
+    ],
+    onProgress: (progress) => {
+      sendToRenderer(IPC_CHANNELS.lyricsFetchProgress, progress)
+    }
+  })
+}
+
 void app.whenReady().then(async () => {
   registerIpcHandlers()
 
   await initializePersistence()
+  initializeLyricsFetchQueue()
 
   protocol.handle(
     MEDIA_SCHEME,
@@ -779,6 +975,17 @@ void app.whenReady().then(async () => {
       void createMainWindow()
     }
   })
+}).catch((error: unknown) => {
+  const message = error instanceof Error ? error.stack || error.message : String(error)
+  console.error('[startup] fatal error during app initialization:', message)
+  if (!process.argv.includes('--smoke-test')) {
+    try {
+      dialog.showErrorBox('Startup Error', `Poweramp LRC Embedder failed to initialize:\n\n${message}`)
+    } catch {
+      // Ignore dialog errors if display is unavailable
+    }
+  }
+  app.exit(1)
 })
 
 app.on('window-all-closed', () => {
@@ -789,6 +996,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true
+  lyricsFetchQueue?.dispose()
   for (const [, resolve] of pendingUnloads) {
     resolve()
   }
