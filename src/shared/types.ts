@@ -154,6 +154,8 @@ export interface LyricsSearchResult {
   /** Provider reference for the candidate (API URL) when available. */
   sourceRef?: string
   score: number
+  /** Timing granularity of this candidate (`word`/`line`/`plain`/...). */
+  timingKind?: LyricsTimingKind
 }
 
 export interface LyricsProvider {

@@ -155,11 +155,16 @@ export class StreamRegistry {
 
   register(filePath: string, webStream: ReadableStream<Uint8Array>, nodeStream: Readable, handle: fs.FileHandle): void {
     const key = this.key(filePath)
+    // Resolve only on 'close'/'error': 'end' fires before the OS file
+    // descriptor is released, so awaiting it would let an embed swap the file
+    // while Windows still holds the handle.
     const closedPromise = new Promise<void>((resolve) => {
-      const cleanup = () => resolve()
+      const cleanup = () => {
+        this.unregister(filePath, webStream)
+        resolve()
+      }
       nodeStream.once('close', cleanup)
       nodeStream.once('error', cleanup)
-      nodeStream.once('end', cleanup)
     })
 
     const tracked: TrackedStream = { webStream, nodeStream, handle, closedPromise }
@@ -247,14 +252,10 @@ function createTrackedStream(
   registry: StreamRegistry
 ): ReadableStream<Uint8Array> {
   const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream<Uint8Array>
+  // Registration itself resolves the closed promise and unregisters the stream
+  // on 'close'/'error' — the descriptor-close events. 'end' only means the
+  // readable side finished producing bytes.
   registry.register(filePath, webStream, nodeStream, handle)
-
-  const done = (): void => {
-    registry.unregister(filePath, webStream)
-  }
-  nodeStream.once('end', done)
-  nodeStream.once('close', done)
-  nodeStream.once('error', done)
 
   return webStream
 }

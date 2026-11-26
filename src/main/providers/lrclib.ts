@@ -308,6 +308,11 @@ export class LrclibProvider implements LyricsProvider {
         // Keep partial results from earlier variants; only the final throw
         // happens when nothing at all was collected.
         lastError = providerError
+        // A rate-limited or offline server will fail every remaining variant:
+        // stop issuing requests instead of hammering it.
+        if (providerError.kind === 'RATE_LIMITED' || providerError.kind === 'NETWORK') {
+          break
+        }
       }
     }
 
@@ -429,8 +434,11 @@ export class LrclibProvider implements LyricsProvider {
       queryArtist: variant.artist,
       queryAlbum: variant.album,
       queryDurationSec: query.durationSec,
-      candidateTitle: result.trackName ?? null,
-      candidateArtist: result.artistName ?? null,
+      // A record returned for this exact query that omits a metadata field is
+      // treated as agreeing with the query for that field; otherwise absent
+      // metadata would trip the wrong-song confidence gate.
+      candidateTitle: result.trackName ?? variant.title,
+      candidateArtist: result.artistName ?? variant.artist,
       candidateAlbum: result.albumName ?? null,
       candidateDurationSec: result.duration ?? null,
       syncedLyrics,
@@ -473,17 +481,25 @@ export class LrclibProvider implements LyricsProvider {
 
   private toSearchResult(result: LrclibGetResponse, query: LyricsQuery): LyricsSearchResult {
     const sourceId = typeof result.id === 'number' ? String(result.id) : undefined
+    const rawSynced = result.syncedLyrics ?? null
+    const rawPlain = result.plainLyrics ?? null
+    // Validate timestamps before handing the candidate to the sifter: payloads
+    // with unusable `[mm:ss.xx]` tags are downgraded to plain lyrics so the UI
+    // never offers a broken "synced" candidate.
+    const timingKind = detectLyricsTimingKind(rawSynced, rawPlain)
+    const syncedLyrics = timingKind === 'plain' ? null : rawSynced
+    const plainLyrics = timingKind === 'plain' ? (rawPlain ?? rawSynced) : rawPlain
     const scored = scoreCandidate({
       queryTitle: query.title,
       queryArtist: query.artist,
       queryAlbum: query.album,
       queryDurationSec: query.durationSec,
-      candidateTitle: result.trackName ?? null,
-      candidateArtist: result.artistName ?? null,
+      candidateTitle: result.trackName ?? query.title,
+      candidateArtist: result.artistName ?? query.artist,
       candidateAlbum: result.albumName ?? null,
       candidateDurationSec: result.duration ?? null,
-      syncedLyrics: result.syncedLyrics ?? null,
-      plainLyrics: result.plainLyrics ?? null
+      syncedLyrics,
+      plainLyrics
     })
     return {
       providerId: PROVIDER_ID,
@@ -495,10 +511,11 @@ export class LrclibProvider implements LyricsProvider {
         typeof result.duration === 'number' && Number.isFinite(result.duration)
           ? result.duration
           : 0,
-      syncedLyrics: result.syncedLyrics ?? null,
-      plainLyrics: result.plainLyrics ?? null,
+      syncedLyrics,
+      plainLyrics,
       ...(sourceId ? { sourceRef: `${this.baseUrl}/api/get/${sourceId}` } : {}),
-      score: scored.score
+      score: scored.score,
+      timingKind
     }
   }
 

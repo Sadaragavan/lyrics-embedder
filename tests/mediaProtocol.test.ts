@@ -382,19 +382,23 @@ describe('stream registry: locked stream destruction and close await', () => {
     expect(response2.status).toBe(400)
   })
 
-  it('handles fs.open errors cleanly as 400/404/500', async () => {
-    // Use a path that definitely doesn't exist on Windows (absolute path with drive letter)
-    const nonExistentPath = 'C:\\nonexistent\\path\\track.mp3'
-    const nonExistentRoot = 'C:\\nonexistent\\path'
-    const handler = handlerFor({ filePath: nonExistentPath, roots: [nonExistentRoot] })
-    const response = await handler(request('media://track/valid-track-id'))
-    // On Windows, non-existent path may return 400 or 404 depending on filesystem behavior
-    expect([400, 404]).toContain(response.status)
+  it('handles fs.stat/fs.open errors cleanly as 400/404/500', async () => {
+    // The resolved track must still live inside an authorized root, otherwise
+    // the handler short-circuits with 403 and never reaches fs.stat/fs.open.
+    const authorizedRoot = await makeTempDir()
+    const missingPath = path.join(authorizedRoot, 'missing-track.mp3')
+    const handler = handlerFor({ filePath: missingPath, roots: [authorizedRoot] })
+    const response = await handler(request(`media://track/${VALID_TRACK_ID}`))
+    // A missing file inside an authorized root exercises the fs.stat ENOENT path.
+    expect(response.status).toBe(404)
 
-    // Test with a directory instead of file
-    const tempDir = await makeTempDir()
-    const dirHandler = handlerFor({ filePath: tempDir, roots: [tempDir] })
-    const dirResponse = await dirHandler(request('media://track/valid-track-id'))
+    // A directory instead of a file must be rejected (not a file -> 400).
+    const dirHandler = handlerFor({ filePath: authorizedRoot, roots: [authorizedRoot] })
+    const dirResponse = await dirHandler(request(`media://track/${VALID_TRACK_ID}`))
     expect(dirResponse.status).toBe(400)
+
+    // A path outside every authorized root never reaches the filesystem.
+    const outsideHandler = handlerFor({ filePath: missingPath, roots: [path.join(authorizedRoot, 'other')] })
+    expect((await outsideHandler(request(`media://track/${VALID_TRACK_ID}`))).status).toBe(403)
   })
 })

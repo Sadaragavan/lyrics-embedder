@@ -486,6 +486,108 @@ describe('LrclibProvider', () => {
       expect(searchUrl).toContain('q=Alt+Artist+Alt+Title')
     })
 
+    it('stops issuing requests once the server reports RATE_LIMITED', async () => {
+      vi.mocked(fetchFn).mockImplementation(
+        async () => new Response(null, { status: 429, headers: { 'Retry-After': '0' } })
+      )
+
+      const error = await provider
+        .searchAllCandidates(makeSearchQuery())
+        .catch((err: unknown) => err)
+      expect(error).toBeInstanceOf(ProviderError)
+      expect((error as ProviderError).kind).toBe('RATE_LIMITED')
+      // 4 attempts for the first request, then the variant loop must break.
+      expect(vi.mocked(fetchFn)).toHaveBeenCalledTimes(4)
+    })
+
+    it('stops issuing requests once the server is unreachable (NETWORK)', async () => {
+      vi.mocked(fetchFn).mockRejectedValue(new TypeError('fetch failed'))
+
+      const error = await provider
+        .searchAllCandidates(makeSearchQuery())
+        .catch((err: unknown) => err)
+      expect(error).toBeInstanceOf(ProviderError)
+      expect((error as ProviderError).kind).toBe('NETWORK')
+      expect(vi.mocked(fetchFn)).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps partial results collected before a rate-limit failure', async () => {
+      vi.mocked(fetchFn)
+        .mockResolvedValueOnce(
+          jsonResponse({
+            id: 11,
+            trackName: 'Test Song',
+            artistName: 'Test Artist',
+            duration: 240,
+            syncedLyrics: '[00:01.00]First',
+            plainLyrics: null
+          })
+        )
+        .mockResolvedValue(new Response(null, { status: 429, headers: { 'Retry-After': '0' } }))
+
+      const results = await provider.searchAllCandidates(makeSearchQuery())
+      expect(results).toHaveLength(1)
+      expect(results[0]!.sourceId).toBe('11')
+    })
+
+    it('sanitizes invalid timestamps and populates timingKind', async () => {
+      vi.mocked(fetchFn)
+        .mockResolvedValueOnce(new Response(null, { status: 404 }))
+        .mockResolvedValueOnce(
+          jsonResponse([
+            {
+              id: 21,
+              trackName: 'Test Song',
+              artistName: 'Test Artist',
+              duration: 240,
+              syncedLyrics: '[00:75.00]Bad timestamp',
+              plainLyrics: null
+            },
+            {
+              id: 22,
+              trackName: 'Test Song',
+              artistName: 'Test Artist',
+              duration: 240,
+              syncedLyrics: '[00:01.00]<00:01.00>He<00:01.50>llo',
+              plainLyrics: null
+            }
+          ])
+        )
+        .mockResolvedValue(new Response(null, { status: 404 }))
+
+      const results = await provider.searchAllCandidates(makeSearchQuery())
+      const broken = results.find((result) => result.sourceId === '21')!
+      const word = results.find((result) => result.sourceId === '22')!
+
+      expect(broken.timingKind).toBe('plain')
+      expect(broken.syncedLyrics).toBeNull()
+      expect(broken.plainLyrics).toBe('[00:75.00]Bad timestamp')
+
+      expect(word.timingKind).toBe('word')
+      expect(word.syncedLyrics).toContain('<00:01.50>')
+    })
+
+    it('marks line-synced candidates with timingKind=line', async () => {
+      vi.mocked(fetchFn)
+        .mockResolvedValueOnce(new Response(null, { status: 404 }))
+        .mockResolvedValueOnce(
+          jsonResponse([
+            {
+              id: 31,
+              trackName: 'Test Song',
+              artistName: 'Test Artist',
+              duration: 240,
+              syncedLyrics: '[00:01.00]Plain line',
+              plainLyrics: 'Plain line'
+            }
+          ])
+        )
+        .mockResolvedValue(new Response(null, { status: 404 }))
+
+      const results = await provider.searchAllCandidates(makeSearchQuery())
+      expect(results[0]!.timingKind).toBe('line')
+    })
+
     it('skips /api/get when the overridden artist is empty', async () => {
       vi.mocked(fetchFn).mockResolvedValueOnce(
         jsonResponse([

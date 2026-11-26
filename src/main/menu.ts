@@ -7,7 +7,12 @@
  */
 
 import { dialog, Menu, type BrowserWindow, type MenuItemConstructorOptions, type MessageBoxOptions } from 'electron'
-import { buildMenuTemplate, sanitizeMenuSyncState, type MenuTemplateItem } from '@shared/menu'
+import {
+  buildMenuTemplate,
+  menuStateEquals,
+  sanitizeMenuSyncState,
+  type MenuTemplateItem
+} from '@shared/menu'
 import type { MenuAction, MenuSyncState, TagEngineHealth } from '@shared/ipc'
 
 export interface ApplicationMenuOptions {
@@ -97,7 +102,13 @@ export function setupApplicationMenu(options: ApplicationMenuOptions): void {
  * malformed or hostile renderer message cannot inject menu roles or accelerators.
  */
 export function updateMenuState(rawState: unknown): MenuSyncState {
-  currentState = sanitizeMenuSyncState(rawState)
+  const nextState = sanitizeMenuSyncState(rawState)
+  // The renderer pushes a snapshot on every render; a no-op push must not
+  // rebuild the native menu (that loop previously rebuilt the menu at 60fps).
+  if (menuStateEquals(nextState, currentState)) {
+    return currentState
+  }
+  currentState = nextState
   rebuildMenu()
   return currentState
 }
