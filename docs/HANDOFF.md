@@ -1,12 +1,12 @@
 # Active Handoff
 
-- Updated: 2026-11-27 01:40 IST
+- Updated: 2026-11-27 02:02 IST
 - Last agent: builder
 - Branch: `arena/bae40d43-lyrics-embedder`
-- Base commit: `213da83` (verified with `git log -n 1 --format=%h -- . ":(exclude)docs/"`). This clone is shallow (`git rev-parse --is-shallow-repository` → `true`); do not assume history was squashed. Pass A is `b021dea`/`b73e9ab` on this branch; the branch was rebased onto the published remote head, so older notes citing `9b4f114`/`96a8164`/`e7f962e`/`ac2044d` refer to pre-rebase SHAs of identical content.
+- Base commit: `03de30c` (verified with `git log -n 1 --format=%h -- . ":(exclude)docs/"`). This clone is shallow (`git rev-parse --is-shallow-repository` → `true`); do not assume history was squashed. Pass A is `b021dea`/`b73e9ab` on this branch; the branch was rebased onto the published remote head, so older notes citing `9b4f114`/`96a8164`/`e7f962e`/`ac2044d` refer to pre-rebase SHAs of identical content.
 
 ## Current Goal
-Pass B (NetEase multi-layer sources + opt-in OpenAI-compatible AI translation/romanization) is implemented and verified on Linux. **Bugs 2–8 fixed**: deduped `stackLrcLayers`, seek nonce guard, cross-track draft loading for batch embed, empty-primary persist, and renderer error boundary. Windows packaging + `--smoke-test` verified on Windows.
+Pass B (NetEase multi-layer sources + opt-in OpenAI-compatible AI translation/romanization) is implemented and verified on Linux. **Phase 1 cleanup complete**: Bugs 1–8 fixed, ESLint `rules-of-hooks` gate added, all verification gates pass on Windows.
 
 ## Completed Since Last Handoff
 1. **NetEase provider** (`src/main/providers/netease.ts`): `id: 'netease'`, `concurrency = 1` queue, >= 500 ms end-to-start pacing recorded in `finally`, `AbortSignal`, bounded 429/503 backoff with `Retry-After`, typed `ProviderError`s. Queries `/api/search/get/web` then `/api/song/lyric` with `Referer: https://music.163.com/` + browser `User-Agent`; extracts `lrc.lyric` / `tlyric.lyric` / `romalrc.lyric`, scores with `scoreCandidate` + `detectLyricsTimingKind`, routes through `evaluateCandidate`. `searchAllCandidates` caps lyric fetches to the top 5 metadata-scored songs.
@@ -22,10 +22,13 @@ Pass B (NetEase multi-layer sources + opt-in OpenAI-compatible AI translation/ro
 11. **Bug 6 (renderer error boundary)**: Added `ErrorBoundary` in `src/renderer/src/components/ErrorBoundary.tsx` wrapping `<App />` in `main.tsx` to surface render crashes (e.g., React #310 hook-order) with a Reload button instead of a blank screen.
 12. **Bug 7 (cross-track draft loading for batch embed)**: `handleEmbedSelected` in `App.tsx` now reads the on-disk draft for non-focused tracks before embedding, so translation/romanization layers saved to disk are merged even when a stale primary is cached in memory.
 13. **Bug 8 (empty-primary persist)**: `persistDraftNow` now saves when `dirty` even if `hasContent` is false. Clearing the primary text is a real edit and skipping the write let stale text reappear from the old draft on next load.
+14. **Bug 1 (hook order stability)**: `visibleResults` `useMemo` and all conditional hooks in `LyricsEditorPanel.tsx` are above the `if (!focusedTrack)` early return. New test `tests/hookOrder.test.ts` covers the focus transition path and mode/layout/filter switches to catch React #310 hook-order errors.
+15. **ESLint rules-of-hooks gate**: Flat config `eslint.config.mjs` enforces `'react-hooks/rules-of-hooks': 'error'`, ignores `out/`, `release/`, `dist/`, `node_modules/`, `tests/fixtures/`. Added `npm run lint` to `package.json` and Mandatory Verification Gates in `AGENTS.md`.
 
 ## Verification Status (Windows workspace)
 - `npm run typecheck`: PASS (0 errors, node + web)
-- `npm test`: PASS (423 passed, 22 files)
+- `npm run lint`: PASS (0 errors, 2 warnings)
+- `npm test`: PASS (431 tests, 23 files including hookOrder)
 - `npm run build`: PASS
 - `npm run build:unpack`: PASS
 - `.\release\win-unpacked\"Poweramp LRC Embedder.exe" --smoke-test`: PASS (`ready: true`, `taglibVersion: "2.5.1 (TagLib 2.3.2)"`)
