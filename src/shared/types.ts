@@ -87,7 +87,13 @@ export interface MediaUnloadAck {
 
 // --- Phase 3: Provider / Lyrics Fetch types ---
 
-export type LyricsProviderId = 'lrclib' | 'localSidecar'
+export type LyricsProviderId = 'lrclib' | 'netease' | 'localSidecar'
+
+/**
+ * Anything that can raise a `ProviderError`: the lyric providers plus the
+ * opt-in AI translator, which is not a lyric source but shares the error model.
+ */
+export type ProviderSourceId = LyricsProviderId | 'ai'
 
 export interface LyricsQuery {
   trackId: string
@@ -118,9 +124,18 @@ export interface LyricsCandidate {
   providerId: LyricsProviderId
   syncedLyrics: string | null
   plainLyrics: string | null
+  /** Same-timestamp translation layer when the provider ships one (NetEase). */
+  translatedLyrics?: string | null
+  /** Same-timestamp romanization layer when the provider ships one (NetEase). */
+  romanizedLyrics?: string | null
   score: number
   /** Timing granularity; populated by providers via `detectLyricsTimingKind`. */
   timingKind?: LyricsTimingKind
+  /** Human-readable candidate title/artist for the sifter when the provider knows it. */
+  title?: string
+  artist?: string
+  album?: string
+  durationSec?: number
 }
 
 /** Router verdict for a single candidate, with an auditable reason. */
@@ -143,11 +158,13 @@ export interface LyricsSearchRequest {
   searchTitle?: string
   searchArtist?: string
   searchAlbum?: string
+  /** Provider allow-list for this search; omitted means every registered provider. */
+  providerIds?: LyricsProviderId[]
 }
 
 export interface LyricsSearchResult {
   providerId: LyricsProviderId
-  /** Provider-native record id (LRCLIB id) when available; used for dedup. */
+  /** Provider-native record id (LRCLIB id / NetEase song id) when available. */
   sourceId?: string
   title: string
   artist: string
@@ -157,6 +174,10 @@ export interface LyricsSearchResult {
   plainLyrics: string | null
   /** Provider reference for the candidate (API URL) when available. */
   sourceRef?: string
+  /** Same-timestamp translation layer bundled with this candidate, if any. */
+  translatedLyrics?: string | null
+  /** Same-timestamp romanization layer bundled with this candidate, if any. */
+  romanizedLyrics?: string | null
   score: number
   /** Timing granularity of this candidate (`word`/`line`/`plain`/...). */
   timingKind?: LyricsTimingKind
@@ -199,6 +220,9 @@ export const MENU_ACTIONS = [
   'layout-live',
   'toggle-play-pause',
   'stop-and-unload',
+  'open-settings',
+  'ai-translate',
+  'ai-romanize',
   'show-tag-engine-status'
 ] as const
 
@@ -246,4 +270,71 @@ export interface LyricsFetchProgress {
   error?: string
   /** Normalized failure category when `phase === 'error'`. */
   errorKind?: ProviderErrorKind
+}
+
+// --- Pass B: AI translation / romanization settings & generation ---
+
+/** OpenAI-compatible chat provider preset identifiers shown in Settings. */
+export type AiProviderPreset = 'openai' | 'gemini' | 'openrouter' | 'ollama' | 'custom'
+
+/** Which secondary layer an AI generation targets. */
+export type AiGenerateMode = 'translation' | 'romanization'
+
+/**
+ * Settings as the renderer sees them. The API key is never sent to the
+ * renderer — only an `hasApiKey` flag so the UI can show a "Saved securely"
+ * badge and a Clear Key button.
+ */
+export interface AiProviderSettingsPublic {
+  preset: AiProviderPreset
+  baseUrl: string
+  model: string
+  targetLanguage: string
+  romanizationStyle: string
+  hasApiKey: boolean
+  /** False when the OS keychain/secret store is unavailable (key stays in memory only). */
+  encryptionAvailable: boolean
+  /** Linux-only: the `safeStorage` backend name, e.g. `basic_text` (insecure). */
+  storageBackend?: string
+}
+
+/** Renderer -> main settings write. Absent `apiKey` means "keep the saved key". */
+export interface AiProviderSettingsInput {
+  preset: AiProviderPreset
+  baseUrl: string
+  model: string
+  targetLanguage: string
+  romanizationStyle: string
+  /** `undefined` = keep, `''` = clear, non-empty = replace. */
+  apiKey?: string
+}
+
+/** Request to generate a translation or romanization layer for one track. */
+export interface AiGenerateRequest {
+  /** Correlation id so cancellation can target an in-flight job. */
+  jobId: string
+  trackId: string
+  mode: AiGenerateMode
+  /** The primary LRC whose timestamps are preserved verbatim. */
+  lyrics: string
+}
+
+export interface AiGenerateResult {
+  jobId: string
+  trackId: string
+  mode: AiGenerateMode
+  /** Generated LRC re-attached to the original `[mm:ss.xx]` timestamps. */
+  lyrics: string
+  /** How many source lines were translated. */
+  lineCount: number
+  /** Provider-reported model name, when available. */
+  model?: string
+}
+
+/** Progress/error notification for an AI job. */
+export interface AiGenerateProgress {
+  jobId: string
+  trackId: string
+  phase: 'running' | 'done' | 'error' | 'cancelled'
+  error?: string
 }

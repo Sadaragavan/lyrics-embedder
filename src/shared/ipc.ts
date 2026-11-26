@@ -1,4 +1,9 @@
 import type {
+  AiGenerateProgress,
+  AiGenerateRequest,
+  AiGenerateResult,
+  AiProviderSettingsInput,
+  AiProviderSettingsPublic,
   DraftStatus,
   LibraryRoot,
   LyricDraft,
@@ -19,6 +24,13 @@ export {
   MENU_ACTIONS,
   SUPPORTED_AUDIO_EXTENSIONS,
   isMenuAction,
+  type AiGenerateMode,
+  type AiGenerateProgress,
+  type AiGenerateRequest,
+  type AiGenerateResult,
+  type AiProviderPreset,
+  type AiProviderSettingsInput,
+  type AiProviderSettingsPublic,
   type DraftStatus,
   type EditorLayout,
   type MenuAction,
@@ -33,6 +45,7 @@ export {
   type LyricsProvider,
   type LyricsProviderId,
   type LyricsQuery,
+  type ProviderSourceId,
   type LyricsSearchRequest,
   type LyricsSearchResult,
   type LyricsSource,
@@ -103,7 +116,11 @@ export interface SaveDraftRequest {
 }
 
 /** Allowed provider IDs for the fetch request (security: allow-list validation). */
-export const ALLOWED_PROVIDER_IDS: readonly LyricsProviderId[] = ['lrclib', 'localSidecar']
+export const ALLOWED_PROVIDER_IDS: readonly LyricsProviderId[] = [
+  'lrclib',
+  'netease',
+  'localSidecar'
+]
 
 export interface LyricsFetchRequest {
   trackId: string
@@ -142,6 +159,12 @@ export const IPC_CHANNELS = {
   lyricsFetchProgress: 'lyrics:fetchProgress',
   lyricsImportFile: 'lyrics:importFile',
   lyricsSearchCandidates: 'lyrics:searchCandidates',
+  getAiSettings: 'settings:getAi',
+  saveAiSettings: 'settings:saveAi',
+  clearAiKey: 'settings:clearAiKey',
+  lyricsAiGenerate: 'lyrics:aiGenerate',
+  lyricsAiCancel: 'lyrics:aiCancel',
+  lyricsAiProgress: 'lyrics:aiProgress',
   menuAction: 'menu:action',
   menuSyncState: 'menu:syncState'
 } as const
@@ -170,10 +193,16 @@ export interface ElectronApi {
   lyricsCancelFetch: (trackId: string) => Promise<void>
   lyricsImportFile: (filePath: string) => Promise<string | null>
   searchLyricsCandidates: (request: LyricsSearchRequest) => Promise<LyricsSearchResult[]>
+  getAiSettings: () => Promise<AiProviderSettingsPublic>
+  saveAiSettings: (settings: AiProviderSettingsInput) => Promise<AiProviderSettingsPublic>
+  clearAiKey: () => Promise<AiProviderSettingsPublic>
+  aiGenerateLyrics: (request: AiGenerateRequest) => Promise<AiGenerateResult>
+  aiCancelGenerate: (jobId: string) => Promise<void>
   onScanProgress: (listener: (progress: ScanProgress) => void) => () => void
   onScanComplete: (listener: (result: ScanLibraryResult) => void) => () => void
   onUnloadAudio: (listener: (request: MediaUnloadRequest) => void) => () => void
   onLyricsFetchProgress: (listener: (progress: LyricsFetchProgress) => void) => () => void
+  onLyricsAiProgress: (listener: (progress: AiGenerateProgress) => void) => () => void
   onMenuAction: (listener: (action: MenuAction) => void) => () => void
   syncMenuState: (state: MenuSyncState) => void
 }

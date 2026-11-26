@@ -44,10 +44,11 @@ OpenCode V2 does not run LSP diagnostics. Run these commands before finishing ch
 
 ### Persistence, Providers & Lyrics Formatting
 - Persist `library-index.json` and per-track draft JSON files in `app.getPath('userData')` via atomic `.tmp` + `fs.rename`. Do not introduce `node:sqlite` or native addons (`node-gyp`).
-- Keep lyric fetching behind the `LyricsProvider` interface (`src/shared/`). Ship LRCLIB (sequential `concurrency = 1`, ~400 ms pacing, custom `User-Agent`, `Retry-After` handling on `429`/`503`) and local sibling `.lrc` import in v1.
+- Keep lyric fetching behind the `LyricsProvider` interface (`src/shared/`). Ship LRCLIB (sequential `concurrency = 1`, ~400 ms pacing, custom `User-Agent`, `Retry-After` handling on `429`/`503`), NetEase Cloud Music (same `concurrency = 1` + >= 500 ms pacing, `Referer`/`User-Agent` headers, `lrc`/`tlyric`/`romalrc` multi-layer payloads capped to the top 5 metadata-scored songs per interactive search), and local sibling `.lrc` import.
 - Output standard line-synced `[mm:ss.xx]` LRC by default (strip `<mm:ss.xx>` A2 word tags unless the user enables the opt-in preserve toggle).
 - Bake `[offset:±ms]` directly into line timestamps and strip `[length:]` headers so Poweramp does not reject tracks on duration mismatches.
-- Support manual paste and same-timestamp multi-line stacking for translations/romanization in v1; defer any OpenAI-compatible `{ baseUrl, apiKey, model }` translation client to v2.
+- Support manual paste and same-timestamp multi-line stacking for translations/romanization, plus the bundled NetEase translation/romanization layers.
+- The opt-in OpenAI-compatible AI translation/romanization client is `src/shared/aiTranslate.ts` (pure prompt/parse/rebuild) + `src/main/providers/aiTranslator.ts` (single-flight HTTP) + `src/main/settingsStore.ts` (encrypted `userData/settings.json`). Invariants: the API key is encrypted with Electron 45's **async** `safeStorage` (`isAsyncEncryptionAvailable` / `encryptStringAsync` / `decryptStringAsync`; never the deprecated sync calls) and is rejected on Linux when `getSelectedStorageBackend() === 'basic_text'`; the key never reaches the renderer (`getPublicSettings()` returns `hasApiKey` only); `validateAiBaseUrl` allows `https://` anywhere but `http://` only for loopback; model-returned text is always re-attached to the original `[mm:ss.xx]` timestamps and model-supplied timestamps are never trusted; AI output only ever replaces the translation/romanization layer, never the primary LRC.
 
 ### Electron Security & Renderer UI
 - Enforce `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, and minimal typed IPC methods in `src/preload/`. Validate all file paths and IPC payloads in `src/main/`.
