@@ -6,8 +6,11 @@ import { formatDuration, hasSyncedTimestamps } from '@shared/lyricsSync'
 import type { SelectionClickModifiers, TrackSelectionState } from '@shared/trackSelection'
 import type { TrackEmbedStatus } from '../types'
 
-/** Compact row height tuned for 360-440px library panes on 1366x768. */
-const ROW_HEIGHT = 34
+/**
+ * Two-line compact card height. Sized so 1366x768 shows ~13 visible tracks in
+ * the library sidebar while leaving room for the header/footer chrome.
+ */
+const ROW_HEIGHT = 48
 
 export interface TrackTableProps {
   tracks: TrackRecord[]
@@ -52,98 +55,86 @@ function buildTrackRowTooltip(
   ].join('\n')
 }
 
+/** Small, wrapped status pill used at the right edge of each card. */
 function renderStatusPill(
   fetchProgress: LyricsFetchProgress | undefined,
   embedStatus: TrackEmbedStatus | undefined
 ) {
+  const pill = (label: string, title: string, className: string) => (
+    <span
+      title={title}
+      className={`shrink-0 whitespace-nowrap rounded border px-1 py-0.5 text-[9px] font-medium leading-none ${className}`}
+    >
+      {label}
+    </span>
+  )
+
   if (embedStatus && embedStatus.phase !== 'idle') {
     if (embedStatus.phase === 'embedding') {
-      return (
-        <span
-          title="Embedding lyrics: unloading the media:// preview, staging, writing, verifying, and swapping the file."
-          className="rounded bg-blue-950/80 border border-blue-800/80 px-1.5 py-0.5 text-[10px] font-medium text-blue-300"
-        >
-          Embedding
-        </span>
+      return pill(
+        'Embedding',
+        'Embedding lyrics: unloading the media:// preview, staging, writing, verifying, and swapping the file.',
+        'bg-blue-950/80 border-blue-800/80 text-blue-300'
       )
     }
     if (embedStatus.phase === 'verified') {
-      return (
-        <span
-          title={`Verified embed target: ${embedStatus.targetPath ?? 'track tag'} (${
-            embedStatus.lyricsSource === 'sidecar' ? '.lrc sidecar' : 'embedded tag'
-          })`}
-          className="rounded bg-emerald-950/80 border border-emerald-800/80 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300"
-        >
-          Embedded
-        </span>
+      return pill(
+        'Embedded',
+        `Verified embed target: ${embedStatus.targetPath ?? 'track tag'} (${
+          embedStatus.lyricsSource === 'sidecar' ? '.lrc sidecar' : 'embedded tag'
+        })`,
+        'bg-emerald-950/80 border-emerald-800/80 text-emerald-300'
       )
     }
-    return (
-      <span
-        title={`Embed failed: ${embedStatus.error ?? 'unknown error'}`}
-        className="rounded bg-red-950/80 border border-red-800/80 px-1.5 py-0.5 text-[10px] font-medium text-red-300"
-      >
-        Embed Err
-      </span>
+    return pill(
+      'Embed Err',
+      `Embed failed: ${embedStatus.error ?? 'unknown error'}`,
+      'bg-red-950/80 border-red-800/80 text-red-300'
     )
   }
 
   if (fetchProgress && fetchProgress.phase !== 'idle') {
     if (fetchProgress.phase === 'fetching') {
-      return (
-        <span
-          title={`Fetching lyrics from ${providerLabel(fetchProgress.providerId)}...`}
-          className="rounded bg-sky-950/80 border border-sky-800/80 px-1.5 py-0.5 text-[10px] font-medium text-sky-300"
-        >
-          {fetchProgress.providerId === 'lrclib' ? 'LRCLIB...' : 'Fetching'}
-        </span>
+      return pill(
+        fetchProgress.providerId === 'lrclib' ? 'LRCLIB...' : 'Fetching',
+        `Fetching lyrics from ${providerLabel(fetchProgress.providerId)}...`,
+        'bg-sky-950/80 border-sky-800/80 text-sky-300'
       )
     }
     if (fetchProgress.phase === 'error') {
-      return (
-        <span
-          title={`Fetch failed (${providerLabel(fetchProgress.providerId)}): ${
-            fetchProgress.error ?? 'unknown error'
-          }`}
-          className="rounded bg-red-950/80 border border-red-800/80 px-1.5 py-0.5 text-[10px] font-medium text-red-300"
-        >
-          Fetch Err
-        </span>
+      return pill(
+        'Fetch Err',
+        `Fetch failed (${providerLabel(fetchProgress.providerId)}): ${
+          fetchProgress.error ?? 'unknown error'
+        }`,
+        'bg-red-950/80 border-red-800/80 text-red-300'
       )
     }
     if (fetchProgress.phase === 'cancelled') {
-      return (
-        <span
-          title={`Fetch cancelled (${providerLabel(fetchProgress.providerId)})`}
-          className="rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400"
-        >
-          Cancelled
-        </span>
+      return pill(
+        'Cancelled',
+        `Fetch cancelled (${providerLabel(fetchProgress.providerId)})`,
+        'bg-zinc-800 border-zinc-700 text-zinc-400'
       )
     }
     if (fetchProgress.phase === 'done') {
-      return fetchProgress.candidate ? (
-        <span
-          title={`Fetched via ${providerLabel(fetchProgress.candidate.providerId)} · score ${
-            fetchProgress.candidate.score
-          }`}
-          className="rounded bg-emerald-950/70 border border-emerald-800/70 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300"
-        >
-          Fetched
-        </span>
-      ) : (
-        <span
-          title={`No match from ${providerLabel(fetchProgress.providerId)}`}
-          className="rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400"
-        >
-          No Match
-        </span>
-      )
+      return fetchProgress.candidate
+        ? pill(
+            'Fetched',
+            `Fetched via ${providerLabel(fetchProgress.candidate.providerId)} · score ${
+              fetchProgress.candidate.score
+            }`,
+            'bg-emerald-950/70 border-emerald-800/70 text-emerald-300'
+          )
+        : pill(
+            'No Match',
+            `No match from ${providerLabel(fetchProgress.providerId)}`,
+            'bg-zinc-800 border-zinc-700 text-zinc-400'
+          )
     }
   }
 
-  return <span className="text-[10px] text-zinc-600">—</span>
+  return <span className="text-[9px] leading-none text-zinc-600">—</span>
 }
 
 export function TrackTable({
@@ -171,20 +162,20 @@ export function TrackTable({
   const hasSelection = selection.selectedIds.size > 0
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col rounded-lg border border-zinc-800 bg-zinc-900/70 overflow-hidden">
-      <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-900 px-2.5 py-1 text-[10px]">
-        <div className="flex items-center gap-2">
-          <span className="font-medium text-zinc-200">Tracks</span>
-          <span className="text-zinc-500 tabular-nums">
+    <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/70">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-zinc-800 bg-zinc-900 px-2.5 py-1 text-[10px]">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="shrink-0 font-medium text-zinc-200">Tracks</span>
+          <span className="truncate tabular-nums text-zinc-500">
             {hasSelection ? `${selection.selectedIds.size} selected` : `${tracks.length} shown`}
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
             onClick={onSelectAll}
             disabled={tracks.length === 0}
-            className="text-[10px] text-zinc-400 hover:text-zinc-100 disabled:opacity-40 shrink-0"
+            className="shrink-0 text-[10px] text-zinc-400 hover:text-zinc-100 disabled:opacity-40"
           >
             Select All
           </button>
@@ -192,20 +183,11 @@ export function TrackTable({
             type="button"
             onClick={onClearSelection}
             disabled={selection.selectedIds.size === 0}
-            className="text-[10px] text-zinc-400 hover:text-zinc-100 disabled:opacity-40 shrink-0"
+            className="shrink-0 text-[10px] text-zinc-400 hover:text-zinc-100 disabled:opacity-40"
           >
             Clear
           </button>
         </div>
-      </div>
-
-      <div className="grid shrink-0 grid-cols-[28px_minmax(0,1fr)_56px_50px_110px_72px] items-center gap-1.5 border-b border-zinc-800/80 bg-zinc-950/60 px-2.5 py-1 text-[9px] font-medium uppercase tracking-wider text-zinc-500">
-        <span />
-        <span>Track / Artist</span>
-        <span>Format</span>
-        <span className="text-right">Time</span>
-        <span>Lyrics</span>
-        <span className="text-right">Status</span>
       </div>
 
       {tracks.length === 0 ? (
@@ -213,7 +195,7 @@ export function TrackTable({
           Scan a library folder to populate tracks.
         </div>
       ) : (
-        <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto select-none">
+        <div ref={scrollRef} className="min-h-0 flex-1 select-none overflow-y-auto">
           <div
             style={{
               height: `${virtualizer.getTotalSize()}px`,
@@ -252,7 +234,7 @@ export function TrackTable({
                     height: `${ROW_HEIGHT}px`,
                     transform: `translateY(${virtualRow.start}px)`
                   }}
-                  className={`grid cursor-pointer grid-cols-[28px_minmax(0,1fr)_56px_50px_110px_72px] items-center gap-1.5 border-b border-zinc-800/50 px-2.5 text-[10px] transition-colors ${
+                  className={`flex cursor-pointer items-center gap-1.5 border-b border-zinc-800/50 px-2 leading-snug transition-colors ${
                     isFocused
                       ? 'bg-emerald-950/45 ring-1 ring-inset ring-emerald-700/70'
                       : isSelected
@@ -267,7 +249,7 @@ export function TrackTable({
                       event.stopPropagation()
                       onRowClick(track.id, { ctrlKey: true })
                     }}
-                    className={`flex h-3.5 w-3.5 items-center justify-center rounded border ${
+                    className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
                       isSelected
                         ? 'border-emerald-500 bg-emerald-600 text-white'
                         : 'border-zinc-600 bg-zinc-950 text-transparent hover:border-zinc-400'
@@ -276,72 +258,67 @@ export function TrackTable({
                     <Check className="h-2.5 w-2.5" />
                   </button>
 
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 min-w-0">
+                  {/*
+                    Line 1: title + lyrics/draft badges.
+                    Line 2: artist · format · duration + status pill.
+                    `leading-snug` plus `break-words` keeps Tamil (நெஞ்சம்) and
+                    Cyrillic vowel marks and descenders from clipping at 280px.
+                  */}
+                  <div className="flex min-w-0 flex-1 flex-col justify-center">
+                    <div className="flex min-w-0 items-center gap-1">
                       {isLoadedAudio && (
                         <Volume2
+                          aria-hidden
                           className={`h-3 w-3 shrink-0 ${
                             isPlaying ? 'text-emerald-400' : 'text-zinc-400'
                           }`}
                         />
                       )}
-                      <div className="min-w-0">
-                        <div className="truncate font-medium text-zinc-100 leading-none">
-                          {track.title}
-                        </div>
-                        <div className="truncate text-[9px] text-zinc-400 leading-none">
-                          {[track.artist || 'Unknown Artist', track.album]
-                            .filter(Boolean)
-                            .join(' · ')}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <span className="font-mono text-[9px] text-zinc-300 truncate leading-none">
-                    {track.format}
-                  </span>
-
-                  <span className="text-right font-mono text-[9px] tabular-nums text-zinc-400 leading-none">
-                    {formatDuration(track.durationSec)}
-                  </span>
-
-                  <div className="flex items-center gap-1 overflow-hidden min-w-0">
-                    {track.lyricsSource === 'none' ? (
-                      <span className="rounded bg-zinc-800/80 px-1 py-0.5 text-[9px] text-zinc-500 leading-none">
-                        None
+                      <span className="min-w-0 truncate text-[11px] font-medium leading-snug text-zinc-100">
+                        {track.title}
                       </span>
-                    ) : (
-                      <>
+                      {hasDraft && (
                         <span
-                          className={`rounded px-1 py-0.5 text-[9px] font-medium leading-none ${
+                          title="A saved draft differs from the lyrics embedded in the file"
+                          className="shrink-0 rounded border border-amber-700/80 bg-amber-900/70 px-1 py-0.5 text-[9px] font-medium leading-none text-amber-200"
+                        >
+                          Draft
+                        </span>
+                      )}
+                      {track.lyricsSource === 'none' ? (
+                        <span className="shrink-0 rounded bg-zinc-800/80 px-1 py-0.5 text-[9px] leading-none text-zinc-500">
+                          None
+                        </span>
+                      ) : (
+                        <span
+                          title={
                             track.lyricsSource === 'sidecar'
-                              ? 'bg-violet-950/70 text-violet-300 border border-violet-800/70'
-                              : 'bg-zinc-800 text-zinc-200 border border-zinc-700'
+                              ? 'Lyrics loaded from a sibling .lrc sidecar file'
+                              : 'Lyrics embedded in the track tag'
+                          }
+                          className={`shrink-0 rounded border px-1 py-0.5 text-[9px] font-medium leading-none ${
+                            track.lyricsSource === 'sidecar'
+                              ? 'border-violet-800/70 bg-violet-950/70 text-violet-300'
+                              : synced
+                                ? 'border-emerald-800/60 bg-emerald-950/70 text-emerald-300'
+                                : 'border-amber-800/60 bg-amber-950/70 text-amber-300'
                           }`}
                         >
-                          {track.lyricsSource === 'sidecar' ? 'LRC' : 'Tag'}
+                          {track.lyricsSource === 'sidecar' ? 'LRC' : synced ? 'Sync' : 'Plain'}
                         </span>
-                        <span
-                          className={`rounded px-1 py-0.5 text-[9px] ${
-                            synced
-                              ? 'bg-emerald-950/70 text-emerald-300'
-                              : 'bg-amber-950/70 text-amber-300'
-                          } leading-none`}
-                        >
-                          {synced ? 'Sync' : 'Plain'}
-                        </span>
-                      </>
-                    )}
-                    {hasDraft && (
-                      <span className="rounded bg-amber-900/70 border border-amber-700/80 px-1 py-0.5 text-[9px] font-medium text-amber-200 leading-none">
-                        Draft
-                      </span>
-                    )}
-                  </div>
+                      )}
+                    </div>
 
-                  <div className="flex justify-end">
-                    {renderStatusPill(fetchProgress, embedStatus)}
+                    <div className="flex min-w-0 items-center gap-1">
+                      <span className="min-w-0 truncate text-[10px] leading-snug text-zinc-400">
+                        {[track.artist || 'Unknown Artist', track.format.toUpperCase(), formatDuration(track.durationSec)].join(
+                          ' · '
+                        )}
+                      </span>
+                      <span className="ml-auto flex shrink-0 items-center">
+                        {renderStatusPill(fetchProgress, embedStatus)}
+                      </span>
+                    </div>
                   </div>
                 </div>
               )
