@@ -46,6 +46,37 @@ export function findActiveLineIndex(lines: readonly LrcLine[], currentTimeMs: nu
 }
 
 /**
+ * Returns every index sharing the active timestamp (stacked translations /
+ * romanization lines). Backwards-compatible with `findActiveLineIndex`: the
+ * returned array always ends at that function's result.
+ */
+export function findActiveLineIndices(
+  lines: readonly LrcLine[],
+  currentTimeMs: number
+): number[] {
+  const lastIndex = findActiveLineIndex(lines, currentTimeMs)
+  if (lastIndex < 0) return []
+
+  const activeTimeMs = lines[lastIndex]!.timeMs
+  let firstIndex = lastIndex
+  while (firstIndex > 0 && lines[firstIndex - 1]!.timeMs === activeTimeMs) {
+    firstIndex--
+  }
+  // Guard against unsorted input: include any equal-timestamp lines after the
+  // binary-search hit as well.
+  let endIndex = lastIndex
+  while (endIndex + 1 < lines.length && lines[endIndex + 1]!.timeMs === activeTimeMs) {
+    endIndex++
+  }
+
+  const indices: number[] = []
+  for (let index = firstIndex; index <= endIndex; index++) {
+    indices.push(index)
+  }
+  return indices
+}
+
+/**
  * Formats seconds as `m:ss` for track duration and player elapsed display.
  */
 export function formatDuration(seconds: number): string {

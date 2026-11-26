@@ -21,6 +21,8 @@ import {
   type LibraryRoot,
   type LyricsFetchRequest,
   type LyricsProviderId,
+  type LyricsSearchRequest,
+  type LyricsSearchResult,
   type MediaUnloadAck,
   type MediaUnloadRequest,
   type MediaUrl,
@@ -48,7 +50,7 @@ import { isPathWithinRoots } from './utils/pathContainment'
 import { isValidTrackId, normalizePathKey, resolveRealPath } from './utils/trackId'
 import { resolveTaglibWasmPath } from './wasmPath'
 import { createLyricsFetchQueue, type LyricsFetchQueue } from './providers/queue'
-import { createLrclibProvider } from './providers/lrclib'
+import { LrclibProvider } from './providers/lrclib'
 import { createLocalSidecarProvider, importLrcFile } from './providers/localSidecar'
 
 const MAX_LYRICS_BYTES = 1024 * 1024
@@ -82,6 +84,7 @@ let isQuitting = false
 const activeTargetDirs = new Map<string, number>()
 let store: JsonStore | null = null
 let lyricsFetchQueue: LyricsFetchQueue | null = null
+let lrclibProvider: LrclibProvider | null = null
 // Tracks `.lrc` file real paths explicitly chosen by the user via native open dialog.
 const authorizedDialogLrcPaths = new Set<string>()
 
@@ -433,6 +436,54 @@ function validateLyricsFetchRequest(payload: unknown): LyricsFetchRequest {
     filePath: c.filePath,
     ...(providerIds ? { providerIds } : {})
   }
+}
+
+function validateLyricsSearchRequest(payload: unknown): LyricsSearchRequest {
+  const base = validateLyricsFetchRequest(payload)
+  const c = payload as Record<string, unknown>
+
+  const readOverride = (
+    key: 'searchTitle' | 'searchArtist' | 'searchAlbum'
+  ): string | undefined => {
+    const value = c[key]
+    if (value === undefined) return undefined
+    if (typeof value !== 'string' || value.length > MAX_QUERY_FIELD_CHARS) {
+      throw new Error(`${key} must be a string <= ${MAX_QUERY_FIELD_CHARS} chars`)
+    }
+    return value
+  }
+
+  const searchTitle = readOverride('searchTitle')
+  const searchArtist = readOverride('searchArtist')
+  const searchAlbum = readOverride('searchAlbum')
+
+  return {
+    trackId: base.trackId,
+    title: base.title,
+    artist: base.artist,
+    album: base.album,
+    durationSec: base.durationSec,
+    filePath: base.filePath,
+    ...(searchTitle === undefined ? {} : { searchTitle }),
+    ...(searchArtist === undefined ? {} : { searchArtist }),
+    ...(searchAlbum === undefined ? {} : { searchAlbum })
+  }
+}
+
+async function prepareAuthorizedLyricsSearch(
+  rawPayload: unknown
+): Promise<LyricsSearchRequest> {
+  const request = validateLyricsSearchRequest(rawPayload)
+  const realPath = await validateAudioFilePath(request.filePath)
+
+  if (store) {
+    const existingTrack = await store.getTrack(request.trackId)
+    if (existingTrack && normalizePathKey(existingTrack.filePath) !== normalizePathKey(realPath)) {
+      throw new Error('Track ID does not match authorized track path')
+    }
+  }
+
+  return { ...request, filePath: realPath }
 }
 
 async function prepareAuthorizedLyricsFetch(rawPayload: unknown): Promise<LyricsFetchRequest> {
@@ -879,6 +930,17 @@ function registerIpcHandlers(): void {
       return importLrcFile(realPath)
     }
   )
+
+  ipcMain.handle(
+    IPC_CHANNELS.lyricsSearchCandidates,
+    async (_event, rawPayload: unknown): Promise<LyricsSearchResult[]> => {
+      if (!lrclibProvider) {
+        throw new Error('LRCLIB provider not initialized')
+      }
+      const request = await prepareAuthorizedLyricsSearch(rawPayload)
+      return lrclibProvider.searchAllCandidates(request)
+    }
+  )
 }
 
 async function createMainWindow(): Promise<void> {
@@ -929,10 +991,11 @@ async function initializePersistence(): Promise<void> {
 }
 
 function initializeLyricsFetchQueue(): void {
+  lrclibProvider = new LrclibProvider()
   lyricsFetchQueue = createLyricsFetchQueue({
     providers: [
       createLocalSidecarProvider(),
-      createLrclibProvider()
+      lrclibProvider
     ],
     onProgress: (progress) => {
       sendToRenderer(IPC_CHANNELS.lyricsFetchProgress, progress)

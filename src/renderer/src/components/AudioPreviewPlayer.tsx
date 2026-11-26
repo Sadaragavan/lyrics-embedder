@@ -6,7 +6,8 @@ import type { SeekRequest } from '../types'
 
 export interface AudioPreviewPlayerProps {
   focusedTrack: TrackRecord | null
-  activeLineText: string | null
+  /** Every active line sharing the current timestamp, stacked top-to-bottom. */
+  activeLineTexts: string[]
   seekRequest: SeekRequest | null
   onPlaybackChange: (loadedTrackId: string | null, timeMs: number, isPlaying: boolean) => void
   onPlayerError: (message: string) => void
@@ -18,7 +19,7 @@ function normalizePathForCompare(filePath: string): string {
 
 export function AudioPreviewPlayer({
   focusedTrack,
-  activeLineText,
+  activeLineTexts,
   seekRequest,
   onPlaybackChange,
   onPlayerError
@@ -279,6 +280,11 @@ export function AudioPreviewPlayer({
           <button
             type="button"
             aria-label={isPlaying && loadedTrackId === focusedTrack?.id ? 'Pause' : 'Play'}
+            title={
+              isPlaying && loadedTrackId === focusedTrack?.id
+                ? 'Pause the preview (keeps the media:// handle open)'
+                : 'Play the focused track over media:// (seek first with a lyric line)'
+            }
             disabled={!focusedTrack && !loadedTrackId}
             onClick={() => void handleTogglePlay()}
             className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-600 text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
@@ -292,6 +298,7 @@ export function AudioPreviewPlayer({
           <button
             type="button"
             aria-label="Stop and unload audio"
+            title="Stop and unload the preview to release the Windows file lock"
             disabled={!loadedTrackId}
             onClick={stopAndUnload}
             className="flex h-7 w-7 items-center justify-center rounded-md border border-zinc-700 bg-zinc-800 text-zinc-300 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
@@ -310,8 +317,18 @@ export function AudioPreviewPlayer({
                   : 'Select a track to preview')}
             </span>
           </div>
-          <div className="truncate text-[11px] text-emerald-300/90 min-h-[16px]">
-            {activeLineText ?? (loadedTrackId ? 'Playing media:// stream' : 'Audio idle')}
+          <div className="min-h-[16px] max-h-16 space-y-0.5 overflow-y-auto text-[11px] text-emerald-300/90">
+            {activeLineTexts.length > 0 ? (
+              activeLineTexts.map((text, index) => (
+                <div key={`${index}-${text}`} className="truncate" title={text}>
+                  {text}
+                </div>
+              ))
+            ) : (
+              <div className="truncate">
+                {loadedTrackId ? 'Playing media:// stream' : 'Audio idle'}
+              </div>
+            )}
           </div>
         </div>
 
@@ -322,6 +339,7 @@ export function AudioPreviewPlayer({
           <input
             type="range"
             aria-label="Audio seek scrubber"
+            title="Seek within the loaded media:// preview"
             min={0}
             max={Math.max(effectiveDuration, 1)}
             step={0.1}

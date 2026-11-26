@@ -6,6 +6,7 @@ import {
   type EmbedLyricsRequest,
   type LyricsFetchProgress,
   type LyricsFetchRequest,
+  type LyricsSearchRequest,
   type MediaUnloadAck,
   type MediaUnloadRequest,
   type SaveDraftRequest,
@@ -52,6 +53,8 @@ const api: ElectronApi = {
     ipcRenderer.invoke(IPC_CHANNELS.lyricsCancelFetch, trackId),
   lyricsImportFile: (filePath: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.lyricsImportFile, filePath),
+  searchLyricsCandidates: (request: LyricsSearchRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.lyricsSearchCandidates, request),
   onScanProgress: (listener) => subscribe(IPC_CHANNELS.scanProgress, listener),
   onScanComplete: (listener) => subscribe(IPC_CHANNELS.scanComplete, listener),
   onUnloadAudio: (listener) => {

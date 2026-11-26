@@ -5,6 +5,8 @@ import type {
   LyricsCandidate,
   LyricsFetchProgress,
   LyricsProviderId,
+  LyricsSearchRequest,
+  LyricsSearchResult,
   MediaUnloadRequest,
   MediaUrl,
   ScanProgress,
@@ -23,6 +25,8 @@ export {
   type LyricsProvider,
   type LyricsProviderId,
   type LyricsQuery,
+  type LyricsSearchRequest,
+  type LyricsSearchResult,
   type LyricsSource,
   type MediaUnloadAck,
   type MediaUnloadRequest,
@@ -124,7 +128,8 @@ export const IPC_CHANNELS = {
   lyricsFetchBatch: 'lyrics:fetchBatch',
   lyricsCancelFetch: 'lyrics:cancelFetch',
   lyricsFetchProgress: 'lyrics:fetchProgress',
-  lyricsImportFile: 'lyrics:importFile'
+  lyricsImportFile: 'lyrics:importFile',
+  lyricsSearchCandidates: 'lyrics:searchCandidates'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]
@@ -150,6 +155,7 @@ export interface ElectronApi {
   lyricsFetchBatch: (queries: LyricsFetchRequest[]) => Promise<(LyricsCandidate | null)[]>
   lyricsCancelFetch: (trackId: string) => Promise<void>
   lyricsImportFile: (filePath: string) => Promise<string | null>
+  searchLyricsCandidates: (request: LyricsSearchRequest) => Promise<LyricsSearchResult[]>
   onScanProgress: (listener: (progress: ScanProgress) => void) => () => void
   onScanComplete: (listener: (result: ScanLibraryResult) => void) => () => void
   onUnloadAudio: (listener: (request: MediaUnloadRequest) => void) => () => void

@@ -26,6 +26,8 @@ export interface LibraryToolbarProps {
   statusFilter: TrackLyricsFilter
   onStatusFilterChange: (filter: TrackLyricsFilter) => void
   activeFetchCount: number
+  /** Most recent fetch failure (`provider: message`) for the cancel tooltip. */
+  lastFetchError?: string | null
   embedding: boolean
   onAddRoot: () => void
   onRemoveRoot: (rootId: string) => void
@@ -51,6 +53,7 @@ export function LibraryToolbar({
   statusFilter,
   onStatusFilterChange,
   activeFetchCount,
+  lastFetchError,
   embedding,
   onAddRoot,
   onRemoveRoot,
@@ -96,6 +99,7 @@ export function LibraryToolbar({
           <button
             type="button"
             onClick={onAddRoot}
+            title="Add a library folder and scan it for supported audio files"
             disabled={scanning}
             className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-100 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -105,6 +109,11 @@ export function LibraryToolbar({
           <button
             type="button"
             onClick={onScanAll}
+            title={
+              workerReady
+                ? 'Rescan every library root for audio files and embedded lyrics'
+                : 'Rescan is unavailable until the tag worker is ready'
+            }
             disabled={scanning || roots.length === 0 || !workerReady}
             className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-100 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -117,6 +126,11 @@ export function LibraryToolbar({
           <button
             type="button"
             onClick={onFetchSelected}
+            title={
+              selectedCount === 0
+                ? 'Select one or more tracks to fetch lyrics'
+                : `Fetch lyrics for ${selectedCount} selected track(s) from LRCLIB or a sibling .lrc file`
+            }
             disabled={selectedCount === 0 || activeFetchCount > 0}
             className="inline-flex items-center gap-1.5 rounded-md bg-sky-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -128,6 +142,9 @@ export function LibraryToolbar({
             <button
               type="button"
               onClick={onCancelActiveFetches}
+              title={`Cancel ${activeFetchCount} in-flight lyrics fetch(es) from LRCLIB or a sibling .lrc.${
+                lastFetchError ? `\nLast fetch error — ${lastFetchError}` : ''
+              }`}
               className="inline-flex items-center gap-1.5 rounded-md border border-red-800 bg-red-950/70 px-2.5 py-1.5 text-xs font-medium text-red-200 hover:bg-red-900/70"
             >
               <XCircle className="h-3.5 w-3.5" />
@@ -138,6 +155,7 @@ export function LibraryToolbar({
           <button
             type="button"
             onClick={onEmbedSelected}
+            title="Atomically write lyrics to selected files (unloads playback, closes media:// handles, restores mtime)"
             disabled={selectedCount === 0 || embedding || !workerReady}
             className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
           >

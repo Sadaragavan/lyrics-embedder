@@ -11,7 +11,9 @@ import type {
   LyricsCandidate,
   LyricsProvider,
   LyricsProviderId,
-  LyricsQuery
+  LyricsQuery,
+  LyricsSearchRequest,
+  LyricsSearchResult
 } from '@shared/types'
 
 const LRCLIB_BASE = 'https://lrclib.net'
@@ -127,6 +129,19 @@ export class LrclibProvider implements LyricsProvider {
     return this.enqueue(() => this.performFetch(query, signal))
   }
 
+  /**
+   * Interactive candidate listing: queries `/api/get` and `/api/search`, dedups
+   * by provider id (falling back to metadata + lyrics text), and returns every
+   * usable match sorted by score. Shares the same `concurrency = 1` queue and
+   * pacing state as `fetch()`.
+   */
+  searchAllCandidates(
+    query: LyricsSearchRequest,
+    signal?: AbortSignal
+  ): Promise<LyricsSearchResult[]> {
+    return this.enqueue(() => this.performSearchAllCandidates(query, signal))
+  }
+
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
     const run = this.requestQueue.then(task, task)
     this.requestQueue = run.then(
@@ -170,6 +185,111 @@ export class LrclibProvider implements LyricsProvider {
     }
 
     return null
+  }
+
+  private buildEffectiveQuery(query: LyricsSearchRequest): LyricsQuery {
+    // An explicit override always wins, including an empty string: clearing the
+    // artist field in the interactive sifter must skip `/api/get` rather than
+    // silently fall back to the track metadata.
+    return {
+      trackId: query.trackId,
+      title: query.searchTitle === undefined ? query.title : query.searchTitle.trim(),
+      artist: query.searchArtist === undefined ? query.artist : query.searchArtist.trim(),
+      album: query.searchAlbum === undefined ? query.album : query.searchAlbum.trim(),
+      durationSec: query.durationSec,
+      filePath: query.filePath
+    }
+  }
+
+  private async performSearchAllCandidates(
+    query: LyricsSearchRequest,
+    signal?: AbortSignal
+  ): Promise<LyricsSearchResult[]> {
+    if (signal?.aborted) return []
+
+    const effectiveQuery = this.buildEffectiveQuery(query)
+    const collected: LrclibGetResponse[] = []
+    const seenIds = new Set<number>()
+    const seenLyrics = new Set<string>()
+
+    const collect = (result: LrclibGetResponse): void => {
+      if (!result.syncedLyrics && !result.plainLyrics) return
+      if (typeof result.id === 'number') {
+        if (seenIds.has(result.id)) return
+        seenIds.add(result.id)
+      }
+      const lyricsKey = (result.syncedLyrics ?? result.plainLyrics ?? '').trim()
+      if (lyricsKey.length > 0) {
+        if (seenLyrics.has(lyricsKey)) return
+        seenLyrics.add(lyricsKey)
+      }
+      collected.push(result)
+    }
+
+    const hasExactFields =
+      effectiveQuery.title.trim().length > 0 && effectiveQuery.artist.trim().length > 0
+    if (hasExactFields) {
+      const getResult = await this.tryGet(effectiveQuery, signal)
+      if (signal?.aborted) return []
+      if (getResult) collect(getResult)
+    }
+
+    if (signal?.aborted) return []
+
+    const searchResults = await this.trySearchMany(effectiveQuery, signal)
+    if (signal?.aborted) return []
+    for (const result of searchResults) collect(result)
+
+    return collected
+      .map((result) => this.toSearchResult(result, effectiveQuery))
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score
+        return (
+          Math.abs(a.durationSec - query.durationSec) -
+          Math.abs(b.durationSec - query.durationSec)
+        )
+      })
+  }
+
+  private async trySearchMany(
+    query: LyricsQuery,
+    signal?: AbortSignal
+  ): Promise<LrclibGetResponse[]> {
+    const searchQuery = `${query.artist} ${query.title}`.trim()
+    if (searchQuery.length === 0) return []
+
+    const params = new URLSearchParams()
+    params.set('q', searchQuery)
+
+    const url = `${this.baseUrl}/api/search?${params.toString()}`
+    const response = await this.fetchWithRetry(url, signal)
+    if (!response) return []
+
+    const data = (await response.json()) as LrclibGetResponse[]
+    if (!Array.isArray(data)) return []
+    return data.filter((result) => Boolean(result.syncedLyrics || result.plainLyrics))
+  }
+
+  private toSearchResult(
+    result: LrclibGetResponse,
+    query: LyricsQuery
+  ): LyricsSearchResult {
+    const sourceId = typeof result.id === 'number' ? String(result.id) : undefined
+    return {
+      providerId: PROVIDER_ID,
+      ...(sourceId ? { sourceId } : {}),
+      title: result.trackName ?? query.title,
+      artist: result.artistName ?? query.artist,
+      album: result.albumName ?? query.album,
+      durationSec:
+        typeof result.duration === 'number' && Number.isFinite(result.duration)
+          ? result.duration
+          : 0,
+      syncedLyrics: result.syncedLyrics ?? null,
+      plainLyrics: result.plainLyrics ?? null,
+      ...(sourceId ? { sourceRef: `${this.baseUrl}/api/get/${sourceId}` } : {}),
+      score: scoreLrclibResult(result, query)
+    }
   }
 
   private async pace(signal?: AbortSignal): Promise<void> {

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   findActiveLineIndex,
+  findActiveLineIndices,
   formatDuration,
   hasSyncedTimestamps
 } from '../src/shared/lyricsSync'
@@ -46,6 +47,38 @@ describe('findActiveLineIndex', () => {
   it('returns last matching index for duplicate stacked timestamps', () => {
     expect(findActiveLineIndex(lines, 3_000)).toBe(2)
     expect(findActiveLineIndex(lines, 5_000)).toBe(2)
+  })
+})
+
+describe('findActiveLineIndices', () => {
+  const lines: LrcLine[] = [
+    { timeMs: 1_000, text: 'Line 1' },
+    { timeMs: 3_000, text: 'Line 2' },
+    { timeMs: 3_000, text: 'Line 2 translation' },
+    { timeMs: 3_000, text: 'Line 2 romanization' },
+    { timeMs: 7_500, text: 'Line 3' }
+  ]
+
+  it('returns all indices sharing the active timestamp', () => {
+    expect(findActiveLineIndices(lines, 3_000)).toEqual([1, 2, 3])
+    expect(findActiveLineIndices(lines, 5_000)).toEqual([1, 2, 3])
+    expect(findActiveLineIndices(lines, 1_500)).toEqual([0])
+    expect(findActiveLineIndices(lines, 9_000)).toEqual([4])
+  })
+
+  it('stays backwards-compatible with findActiveLineIndex', () => {
+    for (const time of [0, 1_000, 2_500, 3_000, 5_000, 7_500, 20_000]) {
+      const indices = findActiveLineIndices(lines, time)
+      const last = indices.length > 0 ? indices[indices.length - 1] : -1
+      expect(last).toBe(findActiveLineIndex(lines, time))
+    }
+  })
+
+  it('returns an empty array for empty input, non-finite time, or before the first line', () => {
+    expect(findActiveLineIndices([], 1_000)).toEqual([])
+    expect(findActiveLineIndices(lines, Number.NaN)).toEqual([])
+    expect(findActiveLineIndices(lines, Number.POSITIVE_INFINITY)).toEqual([])
+    expect(findActiveLineIndices(lines, 999)).toEqual([])
   })
 })
 

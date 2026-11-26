@@ -5,12 +5,13 @@ import type {
   LyricsCandidate,
   LyricsFetchProgress,
   LyricsFetchRequest,
+  LyricsSearchResult,
   ScanProgress,
   TagEngineHealth,
   TrackRecord
 } from '@shared/ipc'
 import { parseLrc } from '@shared/lrc'
-import { findActiveLineIndex } from '@shared/lyricsSync'
+import { findActiveLineIndices } from '@shared/lyricsSync'
 import {
   applyTrackClick,
   clearSelection,
@@ -55,6 +56,18 @@ export function App() {
   const [draftTrackIds, setDraftTrackIds] = useState<Set<string>>(() => new Set())
   const [dirtyTrackIds, setDirtyTrackIds] = useState<Set<string>>(() => new Set())
   const [preserveWordTags, setPreserveWordTags] = useState(false)
+  /** Live preview text emitted by the editor (primary or stacked layers). */
+  const [livePreview, setLivePreview] = useState<{ trackId: string; text: string } | null>(null)
+
+  const [sifterOpen, setSifterOpen] = useState(false)
+  const [searchTitle, setSearchTitle] = useState('')
+  const [searchArtist, setSearchArtist] = useState('')
+  const [searchAlbum, setSearchAlbum] = useState('')
+  const [searchDuration, setSearchDuration] = useState('')
+  const [searchResults, setSearchResults] = useState<LyricsSearchResult[]>([])
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
+  const [searchSearched, setSearchSearched] = useState(false)
 
   const [fetchProgressMap, setFetchProgressMap] = useState<Map<string, LyricsFetchProgress>>(
     () => new Map()
@@ -76,6 +89,8 @@ export function App() {
   tracksRef.current = tracks
   const draftTextsRef = useRef(draftTexts)
   draftTextsRef.current = draftTexts
+  /** Invalidates in-flight candidate searches when focus changes. */
+  const searchNonceRef = useRef(0)
 
   const filteredTracks = useMemo(
     () =>
@@ -103,15 +118,32 @@ export function App() {
     return draftTexts.get(focusedTrack.id) ?? focusedTrack.lyrics ?? ''
   }, [focusedTrack, draftTexts])
 
-  const activeLineText = useMemo(() => {
-    if (!loadedTrackId) return null
+  const focusedTrackId = focusedTrack?.id ?? null
+
+  const activeLineTexts = useMemo(() => {
+    if (!loadedTrackId) return []
+    const useLivePreview =
+      focusedTrackId === loadedTrackId &&
+      livePreview !== null &&
+      livePreview.trackId === loadedTrackId
     const loadedTrack = tracks.find((t) => t.id === loadedTrackId)
-    const lyrics = draftTexts.get(loadedTrackId) ?? loadedTrack?.lyrics ?? ''
-    if (!lyrics) return null
+    const lyrics = useLivePreview
+      ? livePreview.text
+      : (draftTexts.get(loadedTrackId) ?? loadedTrack?.lyrics ?? '')
+    if (!lyrics) return []
     const lines = parseLrc(lyrics, { preserveWordTags })
-    const idx = findActiveLineIndex(lines, playbackTimeMs)
-    return idx >= 0 ? (lines[idx]?.text || '(instrumental)') : null
-  }, [loadedTrackId, tracks, draftTexts, preserveWordTags, playbackTimeMs])
+    return findActiveLineIndices(lines, playbackTimeMs).map(
+      (index) => lines[index]?.text || '(instrumental)'
+    )
+  }, [
+    loadedTrackId,
+    focusedTrackId,
+    livePreview,
+    tracks,
+    draftTexts,
+    preserveWordTags,
+    playbackTimeMs
+  ])
 
   const activeFetchCount = useMemo(() => {
     let count = 0
@@ -122,9 +154,9 @@ export function App() {
   }, [fetchProgressMap])
 
   const applyFetchedCandidate = useCallback(
-    async (trackId: string, candidate: LyricsCandidate) => {
+    async (trackId: string, candidate: LyricsCandidate): Promise<boolean> => {
       const text = candidate.syncedLyrics ?? candidate.plainLyrics
-      if (!text) return
+      if (!text) return false
       try {
         const draft = await window.api.saveDraft({ trackId, lyrics: text, status: 'pending' })
         setDraftTexts((prev) => {
@@ -145,8 +177,10 @@ export function App() {
         setTracks((prev) =>
           prev.map((track) => (track.id === trackId ? { ...track, draftId: draft.id } : track))
         )
+        return true
       } catch (error) {
         setBannerError(error instanceof Error ? error.message : String(error))
+        return false
       }
     },
     []
@@ -250,6 +284,96 @@ export function App() {
       cancelled = true
     }
   }, [selection.focusedId])
+
+  // Pre-fill the candidate sifter from the focused track and reset stale results.
+  useEffect(() => {
+    searchNonceRef.current += 1
+    setSearchLoading(false)
+    const track = focusedTrackId
+      ? (tracksRef.current.find((t) => t.id === focusedTrackId) ?? null)
+      : null
+    setSearchTitle(track?.title ?? '')
+    setSearchArtist(track?.artist ?? '')
+    setSearchAlbum(track?.album ?? '')
+    setSearchDuration(
+      track && Number.isFinite(track.durationSec) && track.durationSec > 0
+        ? String(Math.round(track.durationSec))
+        : ''
+    )
+    setSearchResults([])
+    setSearchError(null)
+    setSearchSearched(false)
+  }, [focusedTrackId])
+
+  const handlePreviewTextChange = useCallback((trackId: string, text: string) => {
+    setLivePreview((prev) =>
+      prev && prev.trackId === trackId && prev.text === text ? prev : { trackId, text }
+    )
+  }, [])
+
+  async function handleSearchCandidates() {
+    if (!focusedTrack || searchLoading) return
+    const nonce = ++searchNonceRef.current
+    setSearchLoading(true)
+    setSearchError(null)
+    setSearchSearched(false)
+    try {
+      const parsedDuration = Number.parseFloat(searchDuration)
+      const durationSec =
+        Number.isFinite(parsedDuration) && parsedDuration > 0
+          ? parsedDuration
+          : focusedTrack.durationSec
+      const results = await window.api.searchLyricsCandidates({
+        trackId: focusedTrack.id,
+        title: focusedTrack.title,
+        artist: focusedTrack.artist,
+        album: focusedTrack.album,
+        durationSec,
+        filePath: focusedTrack.filePath,
+        searchTitle: searchTitle.trim(),
+        searchArtist: searchArtist.trim(),
+        searchAlbum: searchAlbum.trim()
+      })
+      if (searchNonceRef.current !== nonce) return
+      setSearchResults(results)
+    } catch (error) {
+      if (searchNonceRef.current !== nonce) return
+      setSearchError(error instanceof Error ? error.message : String(error))
+    } finally {
+      if (searchNonceRef.current === nonce) {
+        setSearchLoading(false)
+        setSearchSearched(true)
+      }
+    }
+  }
+
+  async function handleLoadCandidate(result: LyricsSearchResult) {
+    if (!focusedTrack) return
+    const text = result.syncedLyrics ?? result.plainLyrics
+    if (!text) return
+    setBannerError(null)
+    const applied = await applyFetchedCandidate(focusedTrack.id, result)
+    if (applied) {
+      setBannerStatus(
+        `Loaded ${result.providerId === 'lrclib' ? 'LRCLIB' : 'local .lrc'} candidate as draft.`
+      )
+    }
+  }
+
+  const lastFetchError = useMemo(() => {
+    for (const progress of fetchProgressMap.values()) {
+      if (progress.phase === 'error' && progress.error) {
+        const provider =
+          progress.providerId === 'lrclib'
+            ? 'LRCLIB'
+            : progress.providerId === 'localSidecar'
+              ? 'local .lrc'
+              : 'provider'
+        return `${provider}: ${progress.error}`
+      }
+    }
+    return null
+  }, [fetchProgressMap])
 
   async function handleAddRoot() {
     setBannerError(null)
@@ -571,6 +695,7 @@ export function App() {
         statusFilter={statusFilter}
         onStatusFilterChange={setStatusFilter}
         activeFetchCount={activeFetchCount}
+        lastFetchError={lastFetchError}
         embedding={embedding}
         onAddRoot={() => void handleAddRoot()}
         onRemoveRoot={(id) => void handleRemoveRoot(id)}
@@ -669,13 +794,30 @@ export function App() {
               if (focusedTrack) void handleDiscardDraft(focusedTrack.id)
             }}
             onEmbedFocused={() => void handleEmbedFocused()}
+            onPreviewTextChange={handlePreviewTextChange}
+            sifterOpen={sifterOpen}
+            onSifterOpenChange={setSifterOpen}
+            searchTitle={searchTitle}
+            onSearchTitleChange={setSearchTitle}
+            searchArtist={searchArtist}
+            onSearchArtistChange={setSearchArtist}
+            searchAlbum={searchAlbum}
+            onSearchAlbumChange={setSearchAlbum}
+            searchDuration={searchDuration}
+            onSearchDurationChange={setSearchDuration}
+            searchResults={searchResults}
+            searchLoading={searchLoading}
+            searchError={searchError}
+            searchSearched={searchSearched}
+            onSearchCandidates={() => void handleSearchCandidates()}
+            onLoadCandidate={(result) => void handleLoadCandidate(result)}
           />
         </div>
       </main>
 
       <AudioPreviewPlayer
         focusedTrack={focusedTrack}
-        activeLineText={activeLineText}
+        activeLineTexts={activeLineTexts}
         seekRequest={seekRequest}
         onPlaybackChange={(nextLoadedId, nextTimeMs, nextPlaying) => {
           setLoadedTrackId(nextLoadedId)

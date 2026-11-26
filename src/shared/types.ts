@@ -102,10 +102,46 @@ export interface LyricsCandidate {
   score: number
 }
 
+export interface LyricsSearchRequest {
+  trackId: string
+  title: string
+  artist: string
+  album: string
+  durationSec: number
+  filePath: string
+  /** Optional interactive-search overrides (never persisted to the track record). */
+  searchTitle?: string
+  searchArtist?: string
+  searchAlbum?: string
+}
+
+export interface LyricsSearchResult {
+  providerId: LyricsProviderId
+  /** Provider-native record id (LRCLIB id) when available; used for dedup. */
+  sourceId?: string
+  title: string
+  artist: string
+  album: string
+  durationSec: number
+  syncedLyrics: string | null
+  plainLyrics: string | null
+  /** Provider reference for the candidate (API URL) when available. */
+  sourceRef?: string
+  score: number
+}
+
 export interface LyricsProvider {
   id: LyricsProviderId
   displayName: string
   fetch(query: LyricsQuery, signal?: AbortSignal): Promise<LyricsCandidate | null>
+  /**
+   * Optional interactive candidate listing. Providers that can return more than
+   * one match implement this; the sifter skips providers that do not.
+   */
+  searchAllCandidates?(
+    query: LyricsSearchRequest,
+    signal?: AbortSignal
+  ): Promise<LyricsSearchResult[]>
 }
 
 export type LyricsFetchPhase = 'idle' | 'fetching' | 'done' | 'error' | 'cancelled'

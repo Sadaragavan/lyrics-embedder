@@ -5,9 +5,21 @@ import {
   type FetchFunction,
   type SleepFunction
 } from '../src/main/providers/lrclib'
-import type { LyricsQuery } from '../src/shared/types'
+import type { LyricsQuery, LyricsSearchRequest } from '../src/shared/types'
 
 function makeQuery(overrides: Partial<LyricsQuery> = {}): LyricsQuery {
+  return {
+    trackId: 'a'.repeat(32),
+    title: 'Test Song',
+    artist: 'Test Artist',
+    album: 'Test Album',
+    durationSec: 240,
+    filePath: '/music/test.flac',
+    ...overrides
+  }
+}
+
+function makeSearchQuery(overrides: Partial<LyricsSearchRequest> = {}): LyricsSearchRequest {
   return {
     trackId: 'a'.repeat(32),
     title: 'Test Song',
@@ -293,5 +305,131 @@ describe('LrclibProvider', () => {
     const result = await provider.fetch(makeQuery(), controller.signal)
     expect(result).toBeNull()
     expect(vi.mocked(fetchFn)).not.toHaveBeenCalled()
+  })
+
+  describe('searchAllCandidates', () => {
+    it('dedups multi-candidates returned by both /api/get and /api/search', async () => {
+      vi.mocked(fetchFn)
+        .mockResolvedValueOnce(
+          jsonResponse({
+            id: 1,
+            trackName: 'Test Song',
+            artistName: 'Test Artist',
+            albumName: 'Test Album',
+            duration: 240,
+            syncedLyrics: '[00:01.00]One',
+            plainLyrics: 'One'
+          })
+        )
+        .mockResolvedValueOnce(
+          jsonResponse([
+            {
+              id: 1,
+              trackName: 'Test Song',
+              artistName: 'Test Artist',
+              albumName: 'Test Album',
+              duration: 240,
+              syncedLyrics: '[00:01.00]One',
+              plainLyrics: 'One'
+            },
+            {
+              id: 2,
+              trackName: 'Test Song',
+              artistName: 'Test Artist',
+              albumName: 'Deluxe',
+              duration: 243,
+              syncedLyrics: '[00:01.00]Two',
+              plainLyrics: 'Two'
+            },
+            {
+              id: 3,
+              trackName: 'Other',
+              artistName: 'Nobody',
+              duration: 100,
+              syncedLyrics: null,
+              plainLyrics: null
+            }
+          ])
+        )
+
+      const results = await provider.searchAllCandidates(makeSearchQuery())
+
+      expect(results).toHaveLength(2)
+      expect(results.map((result) => result.sourceId)).toEqual(['1', '2'])
+      expect(results[0]!.syncedLyrics).toBe('[00:01.00]One')
+      expect(results[0]!.sourceRef).toBe('https://lrclib.test/api/get/1')
+      expect(results[1]!.album).toBe('Deluxe')
+      expect(results[1]!.providerId).toBe('lrclib')
+    })
+
+    it('paces the /api/search call after /api/get using the shared queue', async () => {
+      vi.mocked(fetchFn)
+        .mockResolvedValueOnce(new Response(null, { status: 404 }))
+        .mockResolvedValueOnce(
+          jsonResponse([
+            {
+              id: 7,
+              trackName: 'Test Song',
+              artistName: 'Test Artist',
+              duration: 240,
+              syncedLyrics: '[00:01.00]Search only',
+              plainLyrics: null
+            }
+          ])
+        )
+
+      const results = await provider.searchAllCandidates(makeSearchQuery())
+
+      expect(results).toHaveLength(1)
+      expect(results[0]!.syncedLyrics).toBe('[00:01.00]Search only')
+      expect(vi.mocked(fetchFn)).toHaveBeenCalledTimes(2)
+      expect(sleepCalls).toEqual([400])
+    })
+
+    it('uses interactive search overrides in /api/get and /api/search queries', async () => {
+      vi.mocked(fetchFn)
+        .mockResolvedValueOnce(new Response(null, { status: 404 }))
+        .mockResolvedValueOnce(jsonResponse([]))
+
+      await provider.searchAllCandidates(
+        makeSearchQuery({
+          searchTitle: 'Alt Title',
+          searchArtist: 'Alt Artist',
+          searchAlbum: 'Alt Album'
+        })
+      )
+
+      const getUrl = vi.mocked(fetchFn).mock.calls[0]![0]
+      const searchUrl = vi.mocked(fetchFn).mock.calls[1]![0]
+      expect(getUrl).toContain('/api/get')
+      expect(getUrl).toContain('track_name=Alt+Title')
+      expect(getUrl).toContain('artist_name=Alt+Artist')
+      expect(getUrl).toContain('album_name=Alt+Album')
+      expect(searchUrl).toContain('/api/search')
+      expect(searchUrl).toContain('q=Alt+Artist+Alt+Title')
+    })
+
+    it('skips /api/get when the overridden artist is empty', async () => {
+      vi.mocked(fetchFn).mockResolvedValueOnce(
+        jsonResponse([
+          {
+            id: 9,
+            trackName: 'Test Song',
+            artistName: 'Test Artist',
+            duration: 240,
+            syncedLyrics: '[00:01.00]Search only',
+            plainLyrics: null
+          }
+        ])
+      )
+
+      const results = await provider.searchAllCandidates(
+        makeSearchQuery({ searchArtist: '' })
+      )
+
+      expect(results).toHaveLength(1)
+      expect(vi.mocked(fetchFn)).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(fetchFn).mock.calls[0]![0]).toContain('/api/search')
+    })
   })
 })

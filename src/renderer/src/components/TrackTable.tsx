@@ -21,6 +21,36 @@ export interface TrackTableProps {
   onClearSelection: () => void
 }
 
+function providerLabel(providerId: string | undefined): string {
+  if (providerId === 'lrclib') return 'LRCLIB'
+  if (providerId === 'localSidecar') return 'Local .lrc'
+  return 'provider'
+}
+
+function buildTrackRowTooltip(
+  track: TrackRecord,
+  hasDraft: boolean,
+  synced: boolean
+): string {
+  const lyricsStatus =
+    track.lyricsSource === 'none'
+      ? 'none'
+      : `${track.lyricsSource === 'sidecar' ? '.lrc sidecar' : 'embedded tag'} · ${
+          synced ? 'synced' : 'plain'
+        }`
+  const modified = Number.isFinite(track.mtimeMs)
+    ? new Date(track.mtimeMs).toLocaleString()
+    : 'unknown'
+  return [
+    track.filePath,
+    `Format: ${track.format}`,
+    `Duration: ${formatDuration(track.durationSec)} (${track.durationSec.toFixed(1)}s)`,
+    `Modified: ${modified}`,
+    `Lyrics: ${lyricsStatus}`,
+    hasDraft ? `Draft: saved${track.draftId ? ` (${track.draftId})` : ''}` : 'Draft: none'
+  ].join('\n')
+}
+
 function renderStatusPill(
   fetchProgress: LyricsFetchProgress | undefined,
   embedStatus: TrackEmbedStatus | undefined
@@ -28,21 +58,29 @@ function renderStatusPill(
   if (embedStatus && embedStatus.phase !== 'idle') {
     if (embedStatus.phase === 'embedding') {
       return (
-        <span className="rounded bg-blue-950/80 border border-blue-800/80 px-1.5 py-0.5 text-[10px] font-medium text-blue-300">
+        <span
+          title="Embedding lyrics: unloading the media:// preview, staging, writing, verifying, and swapping the file."
+          className="rounded bg-blue-950/80 border border-blue-800/80 px-1.5 py-0.5 text-[10px] font-medium text-blue-300"
+        >
           Embedding
         </span>
       )
     }
     if (embedStatus.phase === 'verified') {
       return (
-        <span className="rounded bg-emerald-950/80 border border-emerald-800/80 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+        <span
+          title={`Verified embed target: ${embedStatus.targetPath ?? 'track tag'} (${
+            embedStatus.lyricsSource === 'sidecar' ? '.lrc sidecar' : 'embedded tag'
+          })`}
+          className="rounded bg-emerald-950/80 border border-emerald-800/80 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300"
+        >
           Embedded
         </span>
       )
     }
     return (
       <span
-        title={embedStatus.error}
+        title={`Embed failed: ${embedStatus.error ?? 'unknown error'}`}
         className="rounded bg-red-950/80 border border-red-800/80 px-1.5 py-0.5 text-[10px] font-medium text-red-300"
       >
         Embed Err
@@ -53,7 +91,10 @@ function renderStatusPill(
   if (fetchProgress && fetchProgress.phase !== 'idle') {
     if (fetchProgress.phase === 'fetching') {
       return (
-        <span className="rounded bg-sky-950/80 border border-sky-800/80 px-1.5 py-0.5 text-[10px] font-medium text-sky-300">
+        <span
+          title={`Fetching lyrics from ${providerLabel(fetchProgress.providerId)}...`}
+          className="rounded bg-sky-950/80 border border-sky-800/80 px-1.5 py-0.5 text-[10px] font-medium text-sky-300"
+        >
           {fetchProgress.providerId === 'lrclib' ? 'LRCLIB...' : 'Fetching'}
         </span>
       )
@@ -61,7 +102,9 @@ function renderStatusPill(
     if (fetchProgress.phase === 'error') {
       return (
         <span
-          title={fetchProgress.error}
+          title={`Fetch failed (${providerLabel(fetchProgress.providerId)}): ${
+            fetchProgress.error ?? 'unknown error'
+          }`}
           className="rounded bg-red-950/80 border border-red-800/80 px-1.5 py-0.5 text-[10px] font-medium text-red-300"
         >
           Fetch Err
@@ -70,18 +113,29 @@ function renderStatusPill(
     }
     if (fetchProgress.phase === 'cancelled') {
       return (
-        <span className="rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">
+        <span
+          title={`Fetch cancelled (${providerLabel(fetchProgress.providerId)})`}
+          className="rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400"
+        >
           Cancelled
         </span>
       )
     }
     if (fetchProgress.phase === 'done') {
       return fetchProgress.candidate ? (
-        <span className="rounded bg-emerald-950/70 border border-emerald-800/70 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+        <span
+          title={`Fetched via ${providerLabel(fetchProgress.candidate.providerId)} · score ${
+            fetchProgress.candidate.score
+          }`}
+          className="rounded bg-emerald-950/70 border border-emerald-800/70 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300"
+        >
           Fetched
         </span>
       ) : (
-        <span className="rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">
+        <span
+          title={`No match from ${providerLabel(fetchProgress.providerId)}`}
+          className="rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400"
+        >
           No Match
         </span>
       )
@@ -182,6 +236,7 @@ export function TrackTable({
                   key={track.id}
                   role="row"
                   aria-selected={isSelected}
+                  title={buildTrackRowTooltip(track, hasDraft, synced)}
                   onClick={(event) =>
                     onRowClick(track.id, {
                       ctrlKey: event.ctrlKey,
