@@ -158,6 +158,55 @@ describe('per-track drafts', () => {
     expect(await store.readDraft(trackId)).toBeNull()
   })
 
+  it('persists translation + romanization layers alongside the primary lyrics', async () => {
+    const dir = await makeTempDir()
+    const store = createStore(dir)
+    const trackId = computeTrackId('C:\\Music\\Layers.flac')
+
+    await store.saveDraft({
+      trackId,
+      lyrics: '[00:01.00]Hello',
+      translation: '[00:01.00]Hola',
+      romanization: '[00:01.00]Haro'
+    })
+
+    const draftPath = path.join(dir, 'drafts', `${trackId}.json`)
+    const onDisk = JSON.parse(await fs.readFile(draftPath, 'utf8'))
+    expect(onDisk.translation).toBe('[00:01.00]Hola')
+    expect(onDisk.romanization).toBe('[00:01.00]Haro')
+
+    const loaded = await store.readDraft(trackId)
+    expect(loaded).toMatchObject({
+      lyrics: '[00:01.00]Hello',
+      translation: '[00:01.00]Hola',
+      romanization: '[00:01.00]Haro'
+    })
+
+    // Empty layers are not written at all, so a single-layer draft stays small.
+    await store.saveDraft({ trackId, lyrics: 'x', translation: '', romanization: '  ' })
+    const cleared = JSON.parse(await fs.readFile(draftPath, 'utf8'))
+    expect(cleared.translation).toBeUndefined()
+    expect(cleared.romanization).toBeUndefined()
+  })
+
+  it('reads legacy single-layer drafts without layer fields', async () => {
+    const dir = await makeTempDir()
+    const store = createStore(dir)
+    const trackId = computeTrackId('C:\\Music\\Legacy.flac')
+    const draftDir = path.join(dir, 'drafts')
+    await fs.mkdir(draftDir, { recursive: true })
+    await fs.writeFile(
+      path.join(draftDir, `${trackId}.json`),
+      JSON.stringify({ id: trackId, trackId, lyrics: '[00:02.00]Old', status: 'pending' }),
+      'utf8'
+    )
+
+    const loaded = await store.readDraft(trackId)
+    expect(loaded?.lyrics).toBe('[00:02.00]Old')
+    expect(loaded?.translation).toBeUndefined()
+    expect(loaded?.romanization).toBeUndefined()
+  })
+
   it('rejects drafts without a track id', async () => {
     const dir = await makeTempDir()
     const store: JsonStore = createStore(dir)

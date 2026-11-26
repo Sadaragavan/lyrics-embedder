@@ -42,6 +42,10 @@ export interface StoreOptions {
 export interface SaveDraftInput {
   trackId: string
   lyrics: string
+  /** Optional translation layer persisted with the primary lyrics. */
+  translation?: string
+  /** Optional romanization layer persisted with the primary lyrics. */
+  romanization?: string
   status?: DraftStatus
 }
 
@@ -255,7 +259,15 @@ export class JsonStore {
     if (!isValidTrackId(trackId)) {
       throw new Error(`Invalid trackId format: ${trackId}`)
     }
-    return readJson<LyricDraft>(this.draftPath(trackId))
+    const draft = await readJson<LyricDraft>(this.draftPath(trackId))
+    if (!draft) return null
+    // Backwards compatibility: drafts written before multi-layer support have no
+    // translation/romanization keys; normalize them to absent optional fields.
+    return {
+      ...draft,
+      translation: typeof draft.translation === 'string' ? draft.translation : undefined,
+      romanization: typeof draft.romanization === 'string' ? draft.romanization : undefined
+    }
   }
 
   async saveDraft(input: SaveDraftInput): Promise<LyricDraft> {
@@ -268,12 +280,24 @@ export class JsonStore {
     if (typeof input.lyrics !== 'string') {
       throw new Error('Draft lyrics must be a string')
     }
+    // Whitespace-only layers carry no content; drop them so old drafts stay
+    // compact and the renderer's "layer present" checks stay meaningful.
+    const translation =
+      typeof input.translation === 'string' && input.translation.trim().length > 0
+        ? input.translation
+        : undefined
+    const romanization =
+      typeof input.romanization === 'string' && input.romanization.trim().length > 0
+        ? input.romanization
+        : undefined
 
     return this.enqueueWrite(async () => {
       const draft: LyricDraft = {
         id: computeDraftId(input.trackId),
         trackId: input.trackId,
         lyrics: input.lyrics,
+        ...(translation === undefined ? {} : { translation }),
+        ...(romanization === undefined ? {} : { romanization }),
         updatedAt: new Date().toISOString(),
         status: input.status ?? 'pending'
       }

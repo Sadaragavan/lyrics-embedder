@@ -63,7 +63,7 @@ export const DEFAULT_MENU_SYNC_STATE: Readonly<MenuSyncState> = Object.freeze({
   preserveWordTags: false,
   sidebarVisible: true,
   mode: 'edit',
-  editorLayout: 'split',
+  editorLayout: 'live',
   isPlaying: false,
   canPlay: false,
   canStop: false,
@@ -72,7 +72,7 @@ export const DEFAULT_MENU_SYNC_STATE: Readonly<MenuSyncState> = Object.freeze({
 })
 
 const WORKSPACE_MODES: readonly WorkspaceMode[] = ['edit', 'layers', 'find']
-const EDITOR_LAYOUTS: readonly EditorLayout[] = ['raw', 'split', 'preview']
+const EDITOR_LAYOUTS: readonly EditorLayout[] = ['live', 'raw']
 const MAX_SELECTED_COUNT = 100_000
 
 function asBoolean(value: unknown): boolean {
@@ -211,12 +211,10 @@ export function buildMenuTemplate(state: MenuSyncState): MenuTemplateItem[] {
           enabled: hasTrack
         }),
         { type: 'separator' },
-        actionable('Save Draft', 'save-draft', {
-          accelerator: 'Ctrl+S',
-          enabled: hasTrack && state.isDirty
-        }),
-        actionable('Discard Draft', 'discard-draft', {
-          enabled: hasTrack && (state.hasDraft || state.isDirty)
+        // Drafts auto-save; the only draft action left is reverting to the
+        // lyrics embedded in the file.
+        actionable('Revert to Embedded File', 'discard-draft', {
+          enabled: hasTrack && state.hasDraft
         }),
         { type: 'separator' },
         actionable('Embed Current Track', 'embed-current-track', {
@@ -299,25 +297,18 @@ export function buildMenuTemplate(state: MenuSyncState): MenuTemplateItem[] {
           label: 'Editor Layout',
           submenu: [
             {
-              label: 'Raw',
+              label: 'Live Editor',
+              id: 'layout-live',
+              action: 'layout-live',
+              type: 'radio',
+              checked: state.editorLayout === 'live'
+            },
+            {
+              label: 'Raw LRC Text',
               id: 'layout-raw',
               action: 'layout-raw',
               type: 'radio',
               checked: state.editorLayout === 'raw'
-            },
-            {
-              label: 'Split',
-              id: 'layout-split',
-              action: 'layout-split',
-              type: 'radio',
-              checked: state.editorLayout === 'split'
-            },
-            {
-              label: 'Preview',
-              id: 'layout-preview',
-              action: 'layout-preview',
-              type: 'radio',
-              checked: state.editorLayout === 'preview'
             }
           ]
         },

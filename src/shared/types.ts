@@ -46,6 +46,10 @@ export interface LyricDraft {
   id: string
   trackId: string
   lyrics: string
+  /** Optional translation layer persisted alongside the primary lyrics. */
+  translation?: string
+  /** Optional romanization layer persisted alongside the primary lyrics. */
+  romanization?: string
   updatedAt: string
   status: DraftStatus
 }
@@ -181,7 +185,6 @@ export const MENU_ACTIONS = [
   'add-library-folder',
   'scan-all-roots',
   'import-lrc',
-  'save-draft',
   'discard-draft',
   'embed-current-track',
   'normalize-lrc',
@@ -193,8 +196,7 @@ export const MENU_ACTIONS = [
   'mode-layers',
   'mode-find',
   'layout-raw',
-  'layout-split',
-  'layout-preview',
+  'layout-live',
   'toggle-play-pause',
   'stop-and-unload',
   'show-tag-engine-status'
@@ -209,8 +211,11 @@ export function isMenuAction(value: unknown): value is MenuAction {
 /** Right-workspace mode selected from the View menu or the in-app mode bar. */
 export type WorkspaceMode = 'edit' | 'layers' | 'find'
 
-/** Edit-mode layout selected from the View > Editor Layout submenu. */
-export type EditorLayout = 'raw' | 'split' | 'preview'
+/**
+ * Edit-mode layout selected from the View > Editor Layout submenu.
+ * `live` is the unified editable synced view; `raw` is plain monospace LRC text.
+ */
+export type EditorLayout = 'live' | 'raw'
 
 /**
  * Renderer-owned menu state. The main process rebuilds the native menu from
