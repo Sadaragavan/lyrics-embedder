@@ -1,33 +1,41 @@
 # Active Handoff
 
-- Updated: 2026-11-25 20:29 IST
-- Last agent: antigravity-builder
+- Updated: 2026-11-26 10:46 IST
+- Last agent: builder
 - Branch: main
-- Base commit: 0150f45
+- Base commit: 05225d0
 
 ## Current Goal
-Run interactive Electron desktop verification and Poweramp Android hardware spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav` + `.lrc` outputs.
+Run the Phase 4 hardware verification walkthrough: interactive Electron desktop pass, then Poweramp Android spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav` + `.lrc` outputs.
 
 ## Completed Since Last Handoff
-- Part A Phase 3 fixes: `LrclibProvider` now throws on exhausted `429`/`503` or network errors (only falling back to `/api/search` on `404`/empty match) and records `lastRequestTime` in `finally`; `LyricsFetchQueue` emits `phase: 'error'` when providers fail without a match and short-circuits on `localSidecar` synced hits; `src/shared/lrc.ts` fixes `[offset:±ms]` polarity (`timeMs - offset`) without premature clamping before `shiftLrcOffset`; `src/main/index.ts` rejects symlinks in `selectLrcFile` and caps fetch query metadata fields at 512 chars.
-- Part B Phase 4 UI: added pure DOM-free `src/shared/{trackSelection,lyricsSync}.ts`, `src/renderer/src/types.ts`, `LibraryToolbar.tsx`, `TrackTable.tsx` (`@tanstack/react-virtual`, React-managed Shift/Ctrl selection), `AudioPreviewPlayer.tsx` (`media://track/<id>`, active-line display, click-to-seek, synchronous ref-backed `onUnloadAudio` unload before preload ack), `LyricsEditorPanel.tsx` (raw/stack layers, offset nudge, normalize, opt-in A2 toggle, LRCLIB/sidecar fetch + cancel, `.lrc` import, drafts, sequential embed), and split `h-screen` `App.tsx` layout keeping `app.css` `@source` directives intact.
-- Added `tests/{trackSelection,lyricsSync}.test.ts` and updated `tests/{lrc,lrclib,lyricsQueue}.test.ts` + `docs/PROGRESS.md`.
+Phase 4.5 delivered four items:
+1. **Candidate Sifter**: `lyrics:searchCandidates` IPC + `LrclibProvider.searchAllCandidates` (`/api/get` then paced `/api/search`, dedup by source id), `LyricsSearchRequest`/`LyricsSearchResult` types, focus-prefilled search fields with stale-response guards, collapsible results with Load Primary / To Translation / To Romanization.
+2. **Multi-line sync**: `findActiveLineIndices` in `src/shared/lyricsSync.ts` returns all stacked lines sharing the active timestamp; `AudioPreviewPlayer` highlights every stacked line (backwards-compatible with `findActiveLineIndex`).
+3. **Transfer controls**: send/swap translation and romanization between layers in `LyricsEditorPanel`, Primary Only / Stacked Preview toggle whose live output feeds both the clickable preview and the player.
+4. **Tooltips**: `title`/accessible labels across editor, toolbar, and table controls.
+
+Tests: `tests/lrclib.test.ts` (+140 lines, candidate dedup/pacing) and `tests/lyricsSync.test.ts` (+33 lines, stacked timestamps).
 
 ## Verification Status
 - `npm run typecheck`: PASS (0 errors)
-- `npm test`: PASS (156/156 tests across 11 files)
+- `npm test`: PASS (163/163 tests across 11 files)
 - `npm run build`: PASS
-- `npm run build:unpack` + `--smoke-test`: PASS (exit 0, `ready: true`, `2.5.1 (TagLib 2.3.2)`)
+- `npm run build:unpack`: PASS
+- Packaged `--smoke-test`: PASS (`ready: true`, `2.5.1 (TagLib 2.3.2)`, no error)
 
 ## Exact Next Step
-1. Launch `npm run dev` (or packaged app) on Windows to verify interactive folder scan, Shift/Ctrl table selection, `media://` playback/seeking, live `onUnloadAudio` lock release during active playback embed, draft badge sync, and stacked translation output.
-2. Transfer embedded `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav` + `.lrc` sample tracks to Poweramp on Android and spot-check synced lyric rendering, `[offset:±ms]` polarity, and UTF-8/UTF-16 tag compatibility; update `docs/PROGRESS.md` once verified.
+1. `npm run dev` (or `release/win-unpacked/Poweramp LRC Embedder.exe`) on Windows: verify folder scan, Shift/Ctrl table selection, `media://` playback/seek, live `onUnloadAudio` lock release while embedding the playing track, candidate sifter search/load, translation transfer/swap, stacked preview, and draft badge sync.
+2. Copy embedded `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav` + `.lrc` samples to Poweramp on Android; spot-check synced rendering, `[offset:±ms]` polarity, stacked translation display, and UTF-8/UTF-16 tag compatibility. Then tick the Phase 4 verification milestone in `docs/PROGRESS.md`.
 
 ## Files in Scope
-- `src/renderer/src/{App.tsx,app.css,types.ts,components/*}`
-- `src/shared/{lrc.ts,lyricsSync.ts,trackSelection.ts}`
-- `docs/{PROGRESS.md,HANDOFF.md}`
+- `src/main/{index.ts,providers/lrclib.ts}`
+- `src/preload/index.ts`
+- `src/renderer/src/{App.tsx,components/{AudioPreviewPlayer,LibraryToolbar,LyricsEditorPanel,TrackTable}.tsx}`
+- `src/shared/{ipc.ts,types.ts,lyricsSync.ts}`
+- `tests/{lrclib,lyricsSync}.test.ts`, `docs/{PROGRESS.md,HANDOFF.md}`
 
 ## Constraints / Open Blockers
-- Physical Android device with Poweramp is required for the Phase 4 hardware spot-check (cannot be run inside automated Windows CLI checks).
-- Workspace sandbox note: `.git` and `node_modules` ownership by `BUILTIN/Administrators` causes `EPERM` on `.git/index.lock` and Vite `.mjs` temp config files inside the sandbox; Vitest, Electron-vite build, packaging, smoke test, and Git commits succeed outside the sandbox.
+- Physical Android device with Poweramp is required for the hardware spot-check; it cannot run in automated Windows CLI checks.
+- Local music samples in `tests/fixtures/*.m4a` and `*.opus` are excluded via `.git/info/exclude` (uncommitted by design) for the hardware pass.
+- Sandbox note: `.git`/`node_modules` owned by `BUILTIN/Administrators` can cause `EPERM` on `.git/index.lock` and Vite `.mjs` temp files inside the sandbox; run Git, Vitest, build, and packaging outside the sandbox.
