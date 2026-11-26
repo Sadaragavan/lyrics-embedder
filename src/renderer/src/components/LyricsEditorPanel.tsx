@@ -423,10 +423,13 @@ export function LyricsEditorPanel({
   }
 
   // --- Active lyrics source chip (Limusic-style footer, left side) ---
+  const hasDraftForTrack = hasDraft
+  const trackLyricsSource = focusedTrack.lyricsSource
+  const hasFetchedCandidate = Boolean(fetchProgress?.candidate)
   const sourceChip = resolveLyricsSourceChip({
-    hasDraft,
-    trackLyricsSource: focusedTrack.lyricsSource,
-    hasFetchedCandidate: Boolean(fetchProgress?.candidate),
+    hasDraft: hasDraftForTrack,
+    trackLyricsSource,
+    hasFetchedCandidate,
     hasSyncedTimestamps: hasSynced
   })
   const sourceKind: LyricsSourceKind = sourceChip.kind
