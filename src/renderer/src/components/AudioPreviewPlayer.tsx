@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pause, Play, Square, Volume2 } from 'lucide-react'
 import type { TagEngineHealth, TrackRecord } from '@shared/ipc'
 import { formatDuration } from '@shared/lyricsSync'
+import { createNonceGuard } from '@shared/nonceGuard'
 import type { PlayerCommand, SeekRequest } from '../types'
 
 export interface AudioPreviewPlayerProps {
@@ -56,6 +57,13 @@ export function AudioPreviewPlayer({
   const togglePlayRef = useRef<() => void>(() => undefined)
   const stopUnloadRef = useRef<() => void>(() => undefined)
   const handledCommandNonceRef = useRef<number | null>(null)
+  /**
+   * Each seek request nonce must be applied exactly once. The seek effect is
+   * keyed on `focusedTrack`, whose object identity changes after an embed
+   * (the track record is refreshed), which would otherwise re-apply the last
+   * seek and jump playback back to an old timestamp.
+   */
+  const seekGuardRef = useRef(createNonceGuard())
 
   const stopAndUnload = useCallback(() => {
     loadNonceRef.current += 1
@@ -145,9 +153,14 @@ export function AudioPreviewPlayer({
     []
   )
 
-  // Handle click-to-seek requests from lyric lines
+  // Handle click-to-seek requests from lyric lines. The nonce guard makes each
+  // request one-shot: re-running this effect (e.g. `focusedTrack` refreshed after
+  // an embed) must not replay a seek the user already left behind.
   useEffect(() => {
     if (!seekRequest || !focusedTrack || seekRequest.trackId !== focusedTrack.id) {
+      return
+    }
+    if (!seekGuardRef.current.shouldHandle(seekRequest.nonce)) {
       return
     }
     const targetSec = Math.max(0, seekRequest.timeMs / 1000)

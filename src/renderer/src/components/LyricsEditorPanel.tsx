@@ -45,8 +45,8 @@ export interface LyricsEditorPanelProps {
   selectedCount: number
   lyricsText: string
   hasDraft: boolean
-  /** Auto-save indicator state (`saving` / `saved` / `idle`). */
-  autoSaveState: 'idle' | 'saving' | 'saved'
+  /** Auto-save indicator state (`idle` / `saving` / `saved` / `error`). */
+  autoSaveState: 'idle' | 'saving' | 'saved' | 'error'
   preserveWordTags: boolean
   onPreserveWordTagsChange: (value: boolean) => void
   onLyricsChange: (nextLyrics: string) => void
@@ -594,6 +594,22 @@ export function LyricsEditorPanel({
     activeRowRef.current?.scrollIntoView({ block: 'nearest' })
   }, [activeTimestampMs, isTrackPlayingOrLoaded])
 
+  /**
+   * Provider filter is applied client-side: results come from one search pass
+   * so switching pills is instant and never re-queries the network.
+   *
+   * NOTE: this hook must stay above the `!focusedTrack` early return. Placing it
+   * after the return changes the hook order between renders and triggers React
+   * error #310 ("Rendered more hooks than during the previous render").
+   */
+  const visibleResults = useMemo(
+    () =>
+      providerFilter === 'all'
+        ? searchResults
+        : searchResults.filter((result) => result.providerId === providerFilter),
+    [searchResults, providerFilter]
+  )
+
   if (!focusedTrack) {
     return (
       <section className="flex h-full min-h-0 flex-col items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900/70 p-6 text-center">
@@ -679,18 +695,6 @@ export function LyricsEditorPanel({
 
   const candidateKey = (result: LyricsSearchResult, index: number): string =>
     `${result.providerId}-${result.sourceId ?? result.sourceRef ?? result.title}-${index}`
-
-  /**
-   * Provider filter is applied client-side: results come from one search pass
-   * so switching pills is instant and never re-queries the network.
-   */
-  const visibleResults = useMemo(
-    () =>
-      providerFilter === 'all'
-        ? searchResults
-        : searchResults.filter((result) => result.providerId === providerFilter),
-    [searchResults, providerFilter]
-  )
 
   const selectedCandidateIndex = (() => {
     if (visibleResults.length === 0) return -1
@@ -886,7 +890,19 @@ export function LyricsEditorPanel({
       : 'Embed'
 
   const autoSaveLabel =
-    autoSaveState === 'saving' ? 'Saving...' : autoSaveState === 'saved' ? 'Draft saved' : ''
+    autoSaveState === 'saving'
+      ? 'Saving...'
+      : autoSaveState === 'saved'
+        ? 'Draft saved'
+        : autoSaveState === 'error'
+          ? 'Save failed'
+          : ''
+  const autoSaveClass =
+    autoSaveState === 'saving'
+      ? 'text-amber-400/90'
+      : autoSaveState === 'error'
+        ? 'text-red-400/90'
+        : 'text-emerald-400/80'
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/70">
@@ -910,7 +926,12 @@ export function LyricsEditorPanel({
               <span
                 role="status"
                 aria-live="polite"
-                className={`shrink-0 ${autoSaveState === 'saving' ? 'text-amber-400/90' : 'text-emerald-400/80'}`}
+                title={
+                  autoSaveState === 'error'
+                    ? 'The draft could not be saved. Your edits are still in the editor; retry by editing again.'
+                    : undefined
+                }
+                className={`shrink-0 ${autoSaveClass}`}
               >
                 {autoSaveLabel}
               </span>

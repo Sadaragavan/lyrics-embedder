@@ -193,6 +193,38 @@ describe('stackLrcLayers', () => {
     const result = stackLrcLayers([a, b])
     expect(result).toBe('[00:01.00]A1\n[00:02.00]B1\n[00:03.00]A2\n[00:04.00]B2')
   })
+
+  it('never emits two lines with the same centisecond timestamp and identical text', () => {
+    // Re-stacking an already-stacked payload must be idempotent: the same line
+    // repeated at the same timestamp collapses to one, preventing the 18 -> 30
+    // line "double stacking" growth on repeated embeds.
+    const primary = `[00:01.00]Hello\n[00:05.00]World`
+    const stacked = stackLrcLayers([primary, primary])
+    expect(stacked).toBe(`[00:01.00]Hello\n[00:05.00]World`)
+    // Explicit duplicate across three layers at the same timestamp.
+    const dup = stackLrcLayers([
+      '[00:02.00]Same',
+      '[00:02.00]Same',
+      '[00:02.00]Same'
+    ])
+    expect(dup).toBe('[00:02.00]Same')
+  })
+
+  it('preserves identical text at different timestamps', () => {
+    const a = `[00:01.00]Chorus\n[00:10.00]Chorus`
+    const b = `[00:05.00]Chorus`
+    const result = stackLrcLayers([a, b])
+    expect(result).toBe(
+      '[00:01.00]Chorus\n[00:05.00]Chorus\n[00:10.00]Chorus'
+    )
+  })
+
+  it('keeps distinct same-timestamp lines (different text) stacked', () => {
+    const primary = `[00:01.00]English`
+    const translation = `[00:01.00]翻訳`
+    const result = stackLrcLayers([primary, translation])
+    expect(result).toBe('[00:01.00]English\n[00:01.00]翻訳')
+  })
 })
 
 describe('shiftLrcOffset', () => {

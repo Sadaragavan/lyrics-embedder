@@ -38,6 +38,33 @@ import {
   type TrackLyricsFilter,
   type TrackSelectionState
 } from '@shared/trackSelection'
+import {
+  clearLayers,
+  createEmptyEditorState,
+  createStateFromDraft,
+  createStateFromFile,
+  getDraftPayload,
+  hasContent,
+  hasSyncedPrimary,
+  importLrc,
+  loadAllLayers,
+  loadPrimary,
+  markSaveError,
+  markSaved,
+  normalizePrimary,
+  revertToEmbedded,
+  sendPrimaryToRomanization,
+  sendPrimaryToTranslation,
+  setAiRomanization,
+  setAiTranslation,
+  setPrimary,
+  setRomanization,
+  setRomanizationVisible,
+  setTranslation,
+  setTranslationVisible,
+  startSave,
+  type EditorState
+} from '@shared/editorState'
 import { AudioPreviewPlayer } from './components/AudioPreviewPlayer'
 import { LibrarySidebar } from './components/LibrarySidebar'
 import {
@@ -92,6 +119,36 @@ function toFetchRequest(track: TrackRecord): LyricsFetchRequest {
   }
 }
 
+/** Per-track editor state map. Keyed by trackId. */
+type EditorStateMap = Map<string, EditorState>
+
+function getOrCreateState(map: EditorStateMap, trackId: string, track: TrackRecord | null | undefined): EditorState {
+  const existing = map.get(trackId)
+  if (existing) return existing
+  // Initialize from track's embedded lyrics if available, otherwise empty
+  const initial = track?.lyrics ? createStateFromFile(trackId, track.lyrics) : createEmptyEditorState(trackId)
+  return initial
+}
+
+/**
+ * Merges the primary lyrics with every enabled, non-empty secondary layer so a
+ * single embedded tag carries translation/romanization as same-timestamp lines.
+ *
+ * Module-level so `useMemo` consumers can list it without a new identity on
+ * every render; `preserveWordTags` is passed explicitly for the same reason.
+ */
+function buildEmbedPayloadFromState(state: EditorState, preserveWordTags: boolean): string {
+  const layers: string[] = []
+  if (state.translation.visible && state.translation.text.trim().length > 0) {
+    layers.push(state.translation.text)
+  }
+  if (state.romanization.visible && state.romanization.text.trim().length > 0) {
+    layers.push(state.romanization.text)
+  }
+  if (layers.length === 0) return state.primary
+  return stackLrcLayers([state.primary, ...layers], { preserveWordTags })
+}
+
 export function App() {
   const [health, setHealth] = useState<TagEngineHealth | null>(null)
   const [roots, setRoots] = useState<LibraryRoot[]>([])
@@ -104,22 +161,11 @@ export function App() {
   const [statusFilter, setStatusFilter] = useState<TrackLyricsFilter>('all')
 
   const [selection, setSelection] = useState<TrackSelectionState>(createEmptySelectionState)
-  const [draftTexts, setDraftTexts] = useState<Map<string, string>>(() => new Map())
-  const [draftTrackIds, setDraftTrackIds] = useState<Set<string>>(() => new Set())
-  /** Sticky draft ids for tracks whose layers were loaded from disk. */
-  const [layerDraftTrackIds, setLayerDraftTrackIds] = useState<Set<string>>(() => new Set())
+  /** Per-track editor state. Replaces draftTexts, secondaryLayerText, romanizationLayerText, etc. */
+  const [editorStates, setEditorStates] = useState<EditorStateMap>(() => new Map())
   const [preserveWordTags, setPreserveWordTags] = useState(false)
   /** Live preview text emitted by the editor (primary or stacked layers). */
   const [livePreview, setLivePreview] = useState<{ trackId: string; text: string } | null>(null)
-  /** Translation + romanization layers lifted so native menu actions can drive them. */
-  const [secondaryLayerText, setSecondaryLayerText] = useState('')
-  const [romanizationLayerText, setRomanizationLayerText] = useState('')
-  /**
-   * Layer visibility toggles. They control what the live preview shows *and*
-   * which layers get stacked into an embed, but never touch the primary text.
-   */
-  const [showTranslationLayer, setShowTranslationLayer] = useState(true)
-  const [showRomanizationLayer, setShowRomanizationLayer] = useState(true)
 
   const [searchTitle, setSearchTitle] = useState('')
   const [searchArtist, setSearchArtist] = useState('')
@@ -194,20 +240,14 @@ export function App() {
   /** Transient info/success message shown in the player dock's status slot. */
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   /** `saving` while a debounced auto-save is in flight, `saved` after it lands. */
-  const [autoSaveState, setAutoSaveState] = useState<'idle' | 'saving' | 'saved'>('idle')
+  // Retained only as a hook slot: the per-track editor state now owns the
+  // save indicator, but the setter still gates legacy status transitions.
+  const [, setAutoSaveState] = useState<'idle' | 'saving' | 'saved'>('idle')
 
   const tracksRef = useRef(tracks)
   tracksRef.current = tracks
-  const draftTextsRef = useRef(draftTexts)
-  draftTextsRef.current = draftTexts
-  /** Latest layer texts, read synchronously by flush/embed helpers. */
-  const layerTextsRef = useRef({ translation: '', romanization: '' })
-  layerTextsRef.current = { translation: secondaryLayerText, romanization: romanizationLayerText }
-  /** Draft id known to exist on disk for the focused track (sticky per track). */
-  const knownDraftIdRef = useRef<string | null>(null)
-  const focusedTrackIdRef = useRef<string | null>(null)
-  const currentSignatureRef = useRef('')
-  const lastSavedSignatureRef = useRef<string | null>(null)
+  const editorStatesRef = useRef(editorStates)
+  editorStatesRef.current = editorStates
   /** Invalidates in-flight candidate searches when focus changes. */
   const searchNonceRef = useRef(0)
   /**
@@ -217,6 +257,17 @@ export function App() {
    * listeners), which drove the render -> IPC -> menu rebuild loop.
    */
   const handleMenuActionRef = useRef<(action: MenuAction) => Promise<void>>(async () => undefined)
+
+  /**
+   * Tracks that have an on-disk draft. Derived from `tracks` (which carries the
+   * authoritative `draftId` after every save and embed) rather than the
+   * editor-state map: the map holds a state for every loaded track, so using its
+   * keys would badge and filter every track with lyrics as a draft.
+   */
+  const draftTrackIds = useMemo(
+    () => new Set(tracks.filter((track) => Boolean(track.draftId)).map((track) => track.id)),
+    [tracks]
+  )
 
   const filteredTracks = useMemo(
     () =>
@@ -239,37 +290,24 @@ export function App() {
     [tracks, selection.focusedId]
   )
 
-  const focusedLyricsText = useMemo(() => {
-    if (!focusedTrack) return ''
-    return draftTexts.get(focusedTrack.id) ?? focusedTrack.lyrics ?? ''
-  }, [focusedTrack, draftTexts])
-
   const focusedTrackId = focusedTrack?.id ?? null
 
-  /** Draft id for the focused track, sticky while its layers are on screen. */
-  const focusedDraftId = useMemo(() => {
-    if (!focusedTrack) return null
-    return focusedTrack.draftId ?? (layerDraftTrackIds.has(focusedTrack.id) ? focusedTrack.id : null)
-  }, [focusedTrack, layerDraftTrackIds])
+  // Get editor state for the focused track
+  const focusedEditorState = useMemo(() => {
+    if (!focusedTrackId) return createEmptyEditorState()
+    return getOrCreateState(editorStates, focusedTrackId, focusedTrack)
+  }, [editorStates, focusedTrackId, focusedTrack])
 
-  /**
-   * Unsaved-change tracking for the auto-save indicator. `dirtyLyrics` mirrors
-   * the edited primary text; `layerEpoch` bumps on every layer edit (including
-   * swaps that leave the text unchanged).
-   */
-  const dirtyLyrics = focusedTrack ? focusedLyricsText : ''
-  const [layerEpoch, setLayerEpoch] = useState(0)
-  const [lastSavedSignature, setLastSavedSignature] = useState<string | null>(null)
-  const currentSignature =
-    focusedTrackId === null
-      ? ''
-      : `${focusedTrackId}\u0000${dirtyLyrics}\u0000${layerEpoch}`
-
-  // Mirror async-read values into refs so debounced saves and flushes always see
-  // the latest focused track / signature without re-created closures.
-  focusedTrackIdRef.current = focusedTrackId
-  currentSignatureRef.current = currentSignature
-  lastSavedSignatureRef.current = lastSavedSignature
+  // Derived values for the focused track (used by LyricsEditorPanel)
+  const focusedLyricsText = focusedEditorState.primary
+  const secondaryLayerText = focusedEditorState.translation.text
+  const romanizationLayerText = focusedEditorState.romanization.text
+  const showTranslationLayer = focusedEditorState.translation.visible
+  const showRomanizationLayer = focusedEditorState.romanization.visible
+  // A draft exists on disk, or the editor holds unsaved edits for it.
+  const focusedHasDraft = Boolean(focusedTrack?.draftId) || focusedEditorState.dirty
+  const focusedIsDirty = focusedEditorState.dirty
+  const focusedSaveState = focusedEditorState.saveState
 
   /**
    * Lyrics text currently driving the audio player's active lines.
@@ -284,8 +322,14 @@ export function App() {
       livePreview.trackId === loadedTrackId
     if (useLivePreview) return livePreview.text
     const loadedTrack = tracks.find((t) => t.id === loadedTrackId)
-    return draftTexts.get(loadedTrackId) ?? loadedTrack?.lyrics ?? ''
-  }, [loadedTrackId, focusedTrackId, livePreview, tracks, draftTexts])
+    // Use editor state if available, otherwise fall back to track lyrics
+    const loadedState = editorStates.get(loadedTrackId)
+    if (loadedState && hasContent(loadedState)) {
+      // Build stacked preview for loaded track
+      return buildEmbedPayloadFromState(loadedState, preserveWordTags)
+    }
+    return loadedTrack?.lyrics ?? ''
+  }, [loadedTrackId, focusedTrackId, livePreview, tracks, editorStates, preserveWordTags])
 
   const loadedTrackParsedLines = useMemo(
     () =>
@@ -313,9 +357,9 @@ export function App() {
   const menuSyncState = useMemo<MenuSyncState>(() => {
     return {
       hasFocusedTrack: focusedTrack !== null,
-      hasDraft: focusedDraftId !== null,
+      hasDraft: focusedHasDraft,
       // Drafts auto-save, so the native menu never shows a "dirty" draft state.
-      isDirty: false,
+      isDirty: focusedIsDirty,
       hasLyrics: Boolean(focusedLyricsText),
       workerReady: Boolean(health?.ready),
       preserveWordTags,
@@ -330,7 +374,8 @@ export function App() {
     }
   }, [
     focusedTrack,
-    focusedDraftId,
+    focusedHasDraft,
+    focusedIsDirty,
     focusedLyricsText,
     health,
     preserveWordTags,
@@ -377,36 +422,19 @@ export function App() {
           ...(romanization.trim().length > 0 ? { romanization } : {}),
           status: 'pending'
         })
-        setDraftTexts((prev) => {
+        setEditorStates((prev) => {
           const next = new Map(prev)
-          next.set(trackId, text)
+          const track = tracksRef.current.find((t) => t.id === trackId)
+          const baseState = track?.lyrics ? createStateFromFile(trackId, track.lyrics) : createEmptyEditorState(trackId)
+          const loaded = loadPrimary(baseState, text)
+          const withTranslation = translation.trim() ? setTranslation(loaded, translation) : loaded
+          const withRomanization = romanization.trim() ? setRomanization(withTranslation, romanization) : withTranslation
+          const withVis = romanization.trim()
+            ? setRomanizationVisible(setTranslationVisible(withRomanization, translation.trim().length > 0), true)
+            : setTranslationVisible(withRomanization, translation.trim().length > 0)
+          next.set(trackId, markSaved(withVis))
           return next
         })
-        setDraftTrackIds((prev) => {
-          const next = new Set(prev)
-          next.add(trackId)
-          return next
-        })
-        setLayerDraftTrackIds((prev) => {
-          const next = new Set(prev)
-          next.add(trackId)
-          return next
-        })
-        if (trackId === focusedTrackIdRef.current) {
-          if (translation.trim().length > 0) {
-            setSecondaryLayerText(translation)
-            setShowTranslationLayer(true)
-          }
-          if (romanization.trim().length > 0) {
-            setRomanizationLayerText(romanization)
-            setShowRomanizationLayer(true)
-          }
-          if (translation.trim().length > 0 || romanization.trim().length > 0) {
-            setLayerEpoch((prev) => prev + 1)
-          }
-          setLastSavedSignature(currentSignatureRef.current)
-          setAutoSaveState('saved')
-        }
         setTracks((prev) =>
           prev.map((track) => (track.id === trackId ? { ...track, draftId: draft.id } : track))
         )
@@ -447,9 +475,21 @@ export function App() {
         setHealth(initialHealth)
         setRoots(initialRoots)
         setTracks(initialTracks)
-        setDraftTrackIds(
-          new Set(initialTracks.filter((t) => Boolean(t.draftId)).map((t) => t.id))
-        )
+        // Initialize editor states for tracks that have drafts
+        const initialEditorStates = new Map<string, EditorState>()
+        for (const track of initialTracks) {
+          if (track.draftId) {
+            const draft = await window.api.getDraft(track.id)
+            if (draft) {
+              initialEditorStates.set(track.id, createStateFromDraft(track.id, draft))
+            } else if (track.lyrics) {
+              initialEditorStates.set(track.id, createStateFromFile(track.id, track.lyrics))
+            }
+          } else if (track.lyrics) {
+            initialEditorStates.set(track.id, createStateFromFile(track.id, track.lyrics))
+          }
+        }
+        setEditorStates(initialEditorStates)
       } catch (error) {
         if (active) {
           setBannerError(error instanceof Error ? error.message : String(error))
@@ -470,9 +510,19 @@ export function App() {
         ])
         setRoots(nextRoots)
         setTracks(nextTracks)
-        setDraftTrackIds(
-          new Set(nextTracks.filter((t) => Boolean(t.draftId)).map((t) => t.id))
-        )
+        // Refresh editor states for tracks with drafts
+        const nextEditorStates = new Map(editorStatesRef.current)
+        for (const track of nextTracks) {
+          if (track.draftId) {
+            const draft = await window.api.getDraft(track.id)
+            if (draft) {
+              nextEditorStates.set(track.id, createStateFromDraft(track.id, draft))
+            }
+          } else if (!nextEditorStates.has(track.id) && track.lyrics) {
+            nextEditorStates.set(track.id, createStateFromFile(track.id, track.lyrics))
+          }
+        }
+        setEditorStates(nextEditorStates)
         setSelection((prev) =>
           reconcileSelection(
             prev,
@@ -512,69 +562,33 @@ export function App() {
 
   /**
    * Restore the persisted draft (primary + translation + romanization) when the
-   * focused track has one on disk. Switching tracks therefore never drops the
-   * translation/romanization layers.
+   * focused track gains a draftId (e.g., after a batch fetch completes).
+   * This effect runs when the track list changes and the focused track gets a draftId.
    */
   useEffect(() => {
-    setStatusMessage((prev) => (prev === null ? prev : null))
-    setAutoSaveState('idle')
-    setLastSavedSignature(null)
-    if (!focusedTrackId) {
-      knownDraftIdRef.current = null
-      return
-    }
-    const track = tracksRef.current.find((candidate) => candidate.id === focusedTrackId)
-    if (!track?.draftId) {
-      knownDraftIdRef.current = null
-      return
-    }
-    knownDraftIdRef.current = track.draftId
-
+    if (!focusedTrackId) return
+    const track = tracksRef.current.find((t) => t.id === focusedTrackId)
+    if (!track?.draftId) return
+    // Check if we already have this draft loaded
+    const currentState = editorStatesRef.current.get(focusedTrackId)
+    if (currentState && hasContent(currentState)) return
+    // Load the draft
     let cancelled = false
     void window.api
       .getDraft(focusedTrackId)
       .then((draft) => {
         if (cancelled || !draft) return
-        setDraftTexts((prev) => {
+        setEditorStates((prev) => {
           const next = new Map(prev)
-          next.set(focusedTrackId, draft.lyrics)
-          return next
-        })
-        setSecondaryLayerText(draft.translation ?? '')
-        setRomanizationLayerText(draft.romanization ?? '')
-        setLayerDraftTrackIds((prev) => {
-          const next = new Set(prev)
-          next.add(focusedTrackId)
+          next.set(focusedTrackId, createStateFromDraft(focusedTrackId, draft))
           return next
         })
       })
       .catch(() => undefined)
-
     return () => {
       cancelled = true
     }
-  }, [focusedTrackId])
-
-  /**
-   * Debounced auto-save (500 ms). Drafts are never saved by hand: any edit to the
-   * primary text, translation, or romanization schedules a write for the focused
-   * track. `flushAutoSave` runs the pending write immediately before switching
-   * tracks or embedding.
-   */
-  useEffect(() => {
-    if (!focusedTrackId) return
-    if (currentSignature === lastSavedSignature) return
-    const track = tracksRef.current.find((candidate) => candidate.id === focusedTrackId)
-    if (!track) return
-    if (dirtyLyrics.trim().length === 0) return
-
-    const timer = setTimeout(() => {
-      void persistDraftNow(focusedTrackId)
-    }, AUTO_SAVE_DEBOUNCE_MS)
-    return () => clearTimeout(timer)
-    // `currentSignature` captures track + primary text + layer epoch.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentSignature, lastSavedSignature, focusedTrackId])
+  }, [focusedTrackId, tracks])
 
   // Pre-fill the candidate sifter from the focused track and reset stale results.
   useEffect(() => {
@@ -692,7 +706,7 @@ export function App() {
       )
       return
     }
-    if (!hasSyncedTimestamps(focusedLyricsText)) {
+    if (!hasSyncedPrimary(focusedEditorState, hasSyncedTimestamps)) {
       setBannerError('AI layers need a primary LRC with [mm:ss.xx] timestamps.')
       return
     }
@@ -708,18 +722,19 @@ export function App() {
         jobId,
         trackId: focusedTrack.id,
         mode,
-        lyrics: focusedLyricsText
+        lyrics: focusedEditorState.primary
       })
       if (aiJobIdRef.current !== jobId) return
-      if (mode === 'translation') {
-        handleSecondaryLayerChange(result.lyrics)
-        setShowTranslationLayer(true)
-      } else {
-        handleRomanizationLayerChange(result.lyrics)
-        setShowRomanizationLayer(true)
-      }
-      // Layer edits bump the auto-save signature, but flush immediately so the
-      // generated layer is durable even if the user switches tracks right away.
+      setEditorStates((prev) => {
+        const next = new Map(prev)
+        const state = next.get(focusedTrack!.id) ?? createEmptyEditorState(focusedTrack!.id)
+        const updated = mode === 'translation'
+          ? setAiTranslation(state, result.lyrics)
+          : setAiRomanization(state, result.lyrics)
+        next.set(focusedTrack!.id, markSaved(updated))
+        return next
+      })
+      // Flush immediately so the generated layer is durable even if the user switches tracks right away.
       await flushAutoSave(focusedTrack.id)
       setStatusMessage(
         `${mode === 'translation' ? 'Translation' : 'Romanization'} ready (${result.lineCount} lines).`
@@ -768,25 +783,18 @@ export function App() {
         romanization,
         status: 'pending'
       })
-      setDraftTexts((prev) => {
+      setEditorStates((prev) => {
         const next = new Map(prev)
-        next.set(focusedTrack.id, text)
+        const baseState = next.get(focusedTrack!.id) ?? createEmptyEditorState(focusedTrack!.id)
+        const loaded = loadAllLayers(baseState, text, translation, romanization)
+        next.set(focusedTrack!.id, markSaved(loaded))
         return next
       })
-      setSecondaryLayerText(translation)
-      setRomanizationLayerText(romanization)
-      setShowTranslationLayer(translation.trim().length > 0)
-      setShowRomanizationLayer(romanization.trim().length > 0)
-      setLayerEpoch((prev) => prev + 1)
-      setDraftTrackIds((prev) => new Set(prev).add(focusedTrack.id))
-      setLayerDraftTrackIds((prev) => new Set(prev).add(focusedTrack.id))
       setTracks((prev) =>
         prev.map((track) =>
-          track.id === focusedTrack.id ? { ...track, draftId: draft.id } : track
+          track.id === focusedTrack!.id ? { ...track, draftId: draft.id } : track
         )
       )
-      setLastSavedSignature(null)
-      setAutoSaveState('saved')
       const layers = [
         translation.trim().length > 0 ? 'translation' : null,
         romanization.trim().length > 0 ? 'romanization' : null
@@ -796,7 +804,7 @@ export function App() {
           ? `Loaded primary + ${layers.join(' + ')} from ${providerDisplayName(result.providerId)}.`
           : `Loaded ${providerDisplayName(result.providerId)} lyrics as the primary.`
       )
-      await persistDraftNow(focusedTrack.id)
+      await flushAutoSave(focusedTrack.id)
       setWorkspaceMode('edit')
     } catch (error) {
       setBannerError(error instanceof Error ? error.message : String(error))
@@ -811,7 +819,7 @@ export function App() {
     const applied = await applyFetchedCandidate(focusedTrack.id, result)
     if (applied) {
       // Loading a candidate persists it as the draft, then returns to editing.
-      await persistDraftNow(focusedTrack.id)
+      await flushAutoSave(focusedTrack.id)
       setStatusMessage(
         `Loaded ${result.providerId === 'lrclib' ? 'LRCLIB' : 'local .lrc'} candidate as the primary lyrics.`
       )
@@ -839,8 +847,8 @@ export function App() {
           progress.providerId === 'lrclib'
             ? 'LRCLIB'
             : progress.providerId === 'localSidecar'
-              ? 'local .lrc'
-              : 'provider'
+            ? 'local .lrc'
+            : 'provider'
         return `${provider}: ${progress.error}`
       }
     }
@@ -881,9 +889,14 @@ export function App() {
           nextTracks.map((t) => t.id)
         )
       )
-      setDraftTrackIds(
-        new Set(nextTracks.filter((t) => Boolean(t.draftId)).map((t) => t.id))
-      )
+      // Refresh editor states
+      const nextEditorStates = new Map(editorStatesRef.current)
+      for (const track of nextTracks) {
+        if (!nextEditorStates.has(track.id) && track.lyrics) {
+          nextEditorStates.set(track.id, createStateFromFile(track.id, track.lyrics))
+        }
+      }
+      setEditorStates(nextEditorStates)
     } catch (error) {
       setBannerError(error instanceof Error ? error.message : String(error))
     }
@@ -901,9 +914,14 @@ export function App() {
       ])
       setRoots(nextRoots)
       setTracks(nextTracks)
-      setDraftTrackIds(
-        new Set(nextTracks.filter((t) => Boolean(t.draftId)).map((t) => t.id))
-      )
+      // Refresh editor states
+      const nextEditorStates = new Map(editorStatesRef.current)
+      for (const track of nextTracks) {
+        if (!nextEditorStates.has(track.id) && track.lyrics) {
+          nextEditorStates.set(track.id, createStateFromFile(track.id, track.lyrics))
+        }
+      }
+      setEditorStates(nextEditorStates)
       setSelection((prev) =>
         reconcileSelection(
           prev,
@@ -920,30 +938,60 @@ export function App() {
 
   function handleRowClick(trackId: string, modifiers: SelectionClickModifiers) {
     // Focusing a different track must not lose the pending draft write.
-    if (trackId !== focusedTrackIdRef.current) {
-      void flushAutoSave(focusedTrackIdRef.current)
+    if (trackId !== focusedTrackId) {
+      void flushAutoSave(focusedTrackId)
     }
     setSelection((prev) => applyTrackClick(prev, visibleTrackIds, trackId, modifiers))
   }
 
   function handleLyricsChange(nextLyrics: string) {
     if (!focusedTrack) return
-    const trackId = focusedTrack.id
-    setDraftTexts((prev) => {
+    setEditorStates((prev) => {
       const next = new Map(prev)
-      next.set(trackId, nextLyrics)
+      const state = next.get(focusedTrack.id) ?? createEmptyEditorState(focusedTrack.id)
+      next.set(focusedTrack.id, setPrimary(state, nextLyrics))
       return next
     })
   }
 
   function handleSecondaryLayerChange(next: string) {
-    setSecondaryLayerText(next)
-    setLayerEpoch((prev) => prev + 1)
+    if (!focusedTrack) return
+    setEditorStates((prev) => {
+      const nextMap = new Map(prev)
+      const state = nextMap.get(focusedTrack.id) ?? createEmptyEditorState(focusedTrack.id)
+      nextMap.set(focusedTrack.id, setTranslation(state, next))
+      return nextMap
+    })
   }
 
   function handleRomanizationLayerChange(next: string) {
-    setRomanizationLayerText(next)
-    setLayerEpoch((prev) => prev + 1)
+    if (!focusedTrack) return
+    setEditorStates((prev) => {
+      const nextMap = new Map(prev)
+      const state = nextMap.get(focusedTrack.id) ?? createEmptyEditorState(focusedTrack.id)
+      nextMap.set(focusedTrack.id, setRomanization(state, next))
+      return nextMap
+    })
+  }
+
+  function handleTranslationVisibilityChange(visible: boolean) {
+    if (!focusedTrack) return
+    setEditorStates((prev) => {
+      const next = new Map(prev)
+      const state = next.get(focusedTrack.id) ?? createEmptyEditorState(focusedTrack.id)
+      next.set(focusedTrack.id, setTranslationVisible(state, visible))
+      return next
+    })
+  }
+
+  function handleRomanizationVisibilityChange(visible: boolean) {
+    if (!focusedTrack) return
+    setEditorStates((prev) => {
+      const next = new Map(prev)
+      const state = next.get(focusedTrack.id) ?? createEmptyEditorState(focusedTrack.id)
+      next.set(focusedTrack.id, setRomanizationVisible(state, visible))
+      return next
+    })
   }
 
   /**
@@ -951,58 +999,81 @@ export function App() {
    * Returns true when a draft exists on disk afterwards.
    */
   async function persistDraftNow(trackId: string): Promise<boolean> {
-    const lyricsOverride = draftTextsRef.current.get(trackId)
-    const track = tracksRef.current.find((candidate) => candidate.id === trackId)
-    const lyrics = lyricsOverride ?? track?.lyrics ?? ''
-    if (lyrics.trim().length === 0) return false
+    const state = editorStatesRef.current.get(trackId)
+    if (!state) return false
+    // Persist when the state is dirty even if it is now empty: clearing the
+    // primary is a real edit, and skipping it lets stale text reappear from the
+    // old draft on the next load (bug 8). Non-dirty states only persist when
+    // they still carry content.
+    if (!state.dirty && !hasContent(state)) return false
 
-    const { translation, romanization } =
-      trackId === focusedTrackIdRef.current
-        ? layerTextsRef.current
-        : { translation: '', romanization: '' }
+    const payload = getDraftPayload(state)
 
-    setAutoSaveState('saving')
+    setEditorStates((prev) => {
+      const next = new Map(prev)
+      const current = next.get(trackId)
+      if (current) next.set(trackId, startSave(current))
+      return next
+    })
+
     try {
       const draft = await window.api.saveDraft({
         trackId,
-        lyrics,
-        translation,
-        romanization,
+        lyrics: payload.lyrics,
+        ...(payload.translation ? { translation: payload.translation } : {}),
+        ...(payload.romanization ? { romanization: payload.romanization } : {}),
         status: 'pending'
       })
-      knownDraftIdRef.current = draft.id
-      setDraftTrackIds((prev) => {
-        const next = new Set(prev)
-        next.add(trackId)
-        return next
-      })
-      setLayerDraftTrackIds((prev) => {
-        const next = new Set(prev)
-        next.add(trackId)
+      setEditorStates((prev) => {
+        const next = new Map(prev)
+        const current = next.get(trackId)
+        if (current) next.set(trackId, markSaved(current))
         return next
       })
       setTracks((prev) =>
         prev.map((t) => (t.id === trackId ? { ...t, draftId: draft.id } : t))
       )
-      if (trackId === focusedTrackIdRef.current) {
-        setLastSavedSignature(currentSignatureRef.current)
+      if (trackId === focusedTrackId) {
         setAutoSaveState('saved')
       }
       return true
     } catch (error) {
       setBannerError(error instanceof Error ? error.message : String(error))
-      if (trackId === focusedTrackIdRef.current) setAutoSaveState('idle')
+      setEditorStates((prev) => {
+        const next = new Map(prev)
+        const current = next.get(trackId)
+        if (current) next.set(trackId, markSaveError(current))
+        return next
+      })
+      if (trackId === focusedTrackId) setAutoSaveState('idle')
       return false
     }
   }
 
   /** Runs any pending debounced save immediately (before switching/embedding). */
   async function flushAutoSave(trackId?: string | null): Promise<void> {
-    const target = trackId ?? focusedTrackIdRef.current
+    const target = trackId ?? focusedTrackId
     if (!target) return
-    if (currentSignatureRef.current === lastSavedSignatureRef.current) return
+    const state = editorStatesRef.current.get(target)
+    if (!state || !state.dirty) return
     await persistDraftNow(target)
   }
+
+  /** Debounced auto-save effect for the focused track. */
+  useEffect(() => {
+    if (!focusedTrackId) return
+    const state = editorStatesRef.current.get(focusedTrackId)
+    if (!state || !state.dirty) return
+    // Only auto-save if primary has content (bug 8: clearing primary should not block save)
+    // Actually, we DO want to save when primary is cleared - that's a user edit.
+    // The guard in the old code was `if (dirtyLyrics.trim().length === 0) return` which prevented saving empty primary.
+    // New behavior: always save when dirty, regardless of content.
+
+    const timer = setTimeout(() => {
+      void persistDraftNow(focusedTrackId)
+    }, AUTO_SAVE_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [focusedTrackId, focusedEditorState.dirty])
 
   /** Revert to the lyrics embedded in the file, clearing every layer. */
   async function handleRevertToEmbedded(trackId: string) {
@@ -1010,33 +1081,19 @@ export function App() {
     try {
       await window.api.deleteDraft(trackId)
       const original = tracksRef.current.find((t) => t.id === trackId)?.lyrics ?? ''
-      setDraftTexts((prev) => {
+      setEditorStates((prev) => {
         const next = new Map(prev)
-        next.set(trackId, original)
+        const current = next.get(trackId) ?? createEmptyEditorState(trackId)
+        next.set(trackId, revertToEmbedded(current, original))
         return next
       })
-      setDraftTrackIds((prev) => {
-        const next = new Set(prev)
-        next.delete(trackId)
-        return next
-      })
-      setLayerDraftTrackIds((prev) => {
-        const next = new Set(prev)
-        next.delete(trackId)
-        return next
-      })
-      if (trackId === focusedTrackIdRef.current) {
-        knownDraftIdRef.current = null
-        setSecondaryLayerText('')
-        setRomanizationLayerText('')
-        setLayerEpoch((prev) => prev + 1)
-        setLastSavedSignature(null)
-        setAutoSaveState('idle')
-        setStatusMessage('Reverted to the lyrics embedded in the file.')
-      }
       setTracks((prev) =>
         prev.map((t) => (t.id === trackId ? { ...t, draftId: undefined } : t))
       )
+      if (trackId === focusedTrackId) {
+        setAutoSaveState('idle')
+        setStatusMessage('Reverted to the lyrics embedded in the file.')
+      }
     } catch (error) {
       setBannerError(error instanceof Error ? error.message : String(error))
     }
@@ -1053,13 +1110,13 @@ export function App() {
         setBannerError('Selected .lrc file was empty, symlinked, or exceeded 1 MiB.')
         return
       }
-      setDraftTexts((prev) => {
+      setEditorStates((prev) => {
         const next = new Map(prev)
-        next.set(focusedTrack.id, content)
+        const state = next.get(focusedTrack!.id) ?? createEmptyEditorState(focusedTrack!.id)
+        next.set(focusedTrack!.id, importLrc(state, content))
         return next
       })
-      setLayerEpoch((prev) => prev + 1)
-      await persistDraftNow(focusedTrack.id)
+      await flushAutoSave(focusedTrack.id)
       setStatusMessage(`Imported ${selected}`)
     } catch (error) {
       setBannerError(error instanceof Error ? error.message : String(error))
@@ -1097,26 +1154,33 @@ export function App() {
         filePath: track.filePath,
         lyrics: payload
       })
+      // The main process re-opens the staged file and sets `verified`. If the
+      // read-back did not verify, treat the whole embed as failed so the draft
+      // and every layer are preserved (never delete a draft on an unverified write).
+      if (!result.verified) {
+        setEmbedStatusMap((prev) => {
+          const next = new Map(prev)
+          next.set(track.id, { phase: 'error', error: 'Embed did not verify cleanly.' })
+          return next
+        })
+        return false
+      }
       const refreshed = await window.api.getTrack(track.id)
+      // Only now, after a verified write, drop the draft.
       await window.api.deleteDraft(track.id)
 
-      setDraftTexts((prev) => {
+      // Update editor state: primary = what was read back from file, layers cleared
+      setEditorStates((prev) => {
         const next = new Map(prev)
-        next.set(track.id, refreshed?.lyrics ?? payload)
+        const embeddedLyrics = refreshed?.lyrics ?? payload
+        next.set(track.id, clearLayers(createStateFromFile(track.id, embeddedLyrics)))
         return next
       })
-      setDraftTrackIds((prev) => {
-        const next = new Set(prev)
-        next.delete(track.id)
-        return next
-      })
-      if (refreshed) {
-        setTracks((prev) =>
-          prev.map((t) =>
-            t.id === track.id ? { ...refreshed, draftId: undefined } : t
-          )
+      setTracks((prev) =>
+        prev.map((t) =>
+          t.id === track.id ? { ...(refreshed ?? t), draftId: undefined } : t
         )
-      }
+      )
       setEmbedStatusMap((prev) => {
         const next = new Map(prev)
         next.set(track.id, {
@@ -1134,26 +1198,9 @@ export function App() {
         next.set(track.id, { phase: 'error', error: message })
         return next
       })
+      // On embed failure, preserve all layers and draft (state unchanged)
       return false
     }
-  }
-
-  /**
-   * Merges the primary lyrics with every enabled, non-empty secondary layer so a
-   * single embedded tag carries translation/romanization as same-timestamp lines.
-   */
-  function buildEmbedPayload(
-    primary: string,
-    translation: string,
-    romanization: string,
-    translateEnabled: boolean,
-    romanizeEnabled: boolean
-  ): string {
-    const layers: string[] = []
-    if (translateEnabled && translation.trim().length > 0) layers.push(translation)
-    if (romanizeEnabled && romanization.trim().length > 0) layers.push(romanization)
-    if (layers.length === 0) return primary
-    return stackLrcLayers([primary, ...layers], { preserveWordTags })
   }
 
   async function handleEmbedFocused() {
@@ -1164,13 +1211,8 @@ export function App() {
     try {
       // Never embed ahead of an in-flight edit.
       await flushAutoSave(focusedTrack.id)
-      const payload = buildEmbedPayload(
-        focusedLyricsText,
-        secondaryLayerText,
-        romanizationLayerText,
-        showTranslationLayer,
-        showRomanizationLayer
-      )
+      const state = editorStatesRef.current.get(focusedTrack.id) ?? createEmptyEditorState(focusedTrack.id)
+      const payload = buildEmbedPayloadFromState(state, preserveWordTags)
       const ok = await embedSingleTrack(focusedTrack, payload)
       if (ok) {
         setStatusMessage(`Embedded lyrics for "${focusedTrack.title}".`)
@@ -1193,35 +1235,40 @@ export function App() {
     let failed = 0
     try {
       for (const track of targets) {
-        let payload = draftTextsRef.current.get(track.id)
-        let translation = ''
-        let romanization = ''
-        if (track.id === focusedTrackIdRef.current) {
-          // The focused track has live (possibly unsaved) layer text.
+        // Always flush auto-save for the focused track before embedding.
+        if (track.id === focusedTrackId) {
           await flushAutoSave(track.id)
-          translation = layerTextsRef.current.translation
-          romanization = layerTextsRef.current.romanization
         }
-        if (payload === undefined && track.draftId) {
-          const draft = await window.api.getDraft(track.id)
-          payload = draft?.lyrics
-          translation = draft?.translation ?? ''
-          romanization = draft?.romanization ?? ''
+
+        // Resolve the authoritative editor state for this track.
+        // - Focused track: memory is authoritative (auto-saved above).
+        // - Non-focused track with an on-disk draft: read the draft so its
+        //   translation/romanization layers are merged even when the primary
+        //   text is already cached in memory (bug 7: cached primary used to
+        //   shadow the saved layers, which were then lost when the draft was
+        //   deleted after embed).
+        // - Otherwise: use whatever editor state exists, else the file lyrics.
+        let state = editorStatesRef.current.get(track.id) ?? null
+        if (track.id !== focusedTrackId && (!state || !state.dirty)) {
+          if (track.draftId) {
+            try {
+              const draft = await window.api.getDraft(track.id)
+              if (draft) state = createStateFromDraft(track.id, draft)
+            } catch {
+              // Fall back to memory / file lyrics if the draft cannot be read.
+            }
+          }
         }
-        if (payload === undefined) {
-          payload = track.lyrics ?? ''
-        }
-        if (payload.length === 0 && track.lyrics === null) {
+
+        let payload: string
+        if (state && hasContent(state)) {
+          payload = buildEmbedPayloadFromState(state, preserveWordTags)
+        } else if (track.lyrics) {
+          payload = track.lyrics
+        } else {
           continue
         }
-        const merged = buildEmbedPayload(
-          payload,
-          translation,
-          romanization,
-          translation.trim().length > 0,
-          romanization.trim().length > 0
-        )
-        const ok = await embedSingleTrack(track, merged)
+        const ok = await embedSingleTrack(track, payload)
         if (ok) succeeded++
         else failed++
       }
@@ -1261,17 +1308,38 @@ export function App() {
         break
       case 'normalize-lrc':
         if (focusedTrack) {
-          handleLyricsChange(normalizeLrc(focusedLyricsText, { preserveWordTags }))
+          setEditorStates((prev) => {
+            const next = new Map(prev)
+            const state = next.get(focusedTrack!.id) ?? createEmptyEditorState(focusedTrack!.id)
+            next.set(focusedTrack!.id, normalizePrimary(state, (t) => normalizeLrc(t, { preserveWordTags })))
+            return next
+          })
         }
         break
       case 'toggle-preserve-word-tags':
         setPreserveWordTags((prev) => !prev)
         break
       case 'send-primary-to-translation':
-        handleSendPrimaryToTranslation()
+        if (focusedTrack) {
+          setEditorStates((prev) => {
+            const next = new Map(prev)
+            const state = next.get(focusedTrack!.id) ?? createEmptyEditorState(focusedTrack!.id)
+            next.set(focusedTrack!.id, sendPrimaryToTranslation(state))
+            return next
+          })
+          setWorkspaceMode('layers')
+        }
         break
       case 'send-primary-to-romanization':
-        handleSendPrimaryToRomanization()
+        if (focusedTrack) {
+          setEditorStates((prev) => {
+            const next = new Map(prev)
+            const state = next.get(focusedTrack!.id) ?? createEmptyEditorState(focusedTrack!.id)
+            next.set(focusedTrack!.id, sendPrimaryToRomanization(state))
+            return next
+          })
+          setWorkspaceMode('layers')
+        }
         break
       case 'toggle-sidebar':
         setSidebarVisible((prev) => !prev)
@@ -1305,18 +1373,6 @@ export function App() {
 
   // Always point the ref at the latest closure (menu actions read live state).
   handleMenuActionRef.current = handleMenuAction
-
-  function handleSendPrimaryToTranslation() {
-    if (!focusedTrack) return
-    setSecondaryLayerText(focusedLyricsText)
-    setWorkspaceMode('layers')
-  }
-
-  function handleSendPrimaryToRomanization() {
-    if (!focusedTrack) return
-    setRomanizationLayerText(focusedLyricsText)
-    setWorkspaceMode('layers')
-  }
 
   return (
     <div className="relative flex h-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100">
@@ -1379,7 +1435,7 @@ export function App() {
             <TrackTable
               tracks={filteredTracks}
               selection={selection}
-              draftTrackIds={draftTrackIds}
+              draftTrackIds={new Set(editorStates.keys())}
               fetchProgressMap={fetchProgressMap}
               embedStatusMap={embedStatusMap}
               loadedTrackId={loadedTrackId}
@@ -1521,12 +1577,8 @@ export function App() {
             focusedTrack={focusedTrack}
             selectedCount={selection.selectedIds.size}
             lyricsText={focusedLyricsText}
-            hasDraft={
-              focusedTrack
-                ? Boolean(focusedTrack.draftId || draftTrackIds.has(focusedTrack.id))
-                : false
-            }
-            autoSaveState={autoSaveState}
+            hasDraft={focusedHasDraft}
+            autoSaveState={focusedSaveState}
             onEditorLayoutChange={setEditorLayout}
             preserveWordTags={preserveWordTags}
             onPreserveWordTagsChange={setPreserveWordTags}
@@ -1550,7 +1602,12 @@ export function App() {
             onEmbedFocused={() => void handleEmbedFocused()}
             onNormalize={() => {
               if (focusedTrack) {
-                handleLyricsChange(normalizeLrc(focusedLyricsText, { preserveWordTags }))
+                setEditorStates((prev) => {
+                  const next = new Map(prev)
+                  const state = next.get(focusedTrack!.id) ?? createEmptyEditorState(focusedTrack!.id)
+                  next.set(focusedTrack!.id, normalizePrimary(state, (t) => normalizeLrc(t, { preserveWordTags })))
+                  return next
+                })
               }
             }}
             onPreviewTextChange={handlePreviewTextChange}
@@ -1584,9 +1641,9 @@ export function App() {
             romanizationLayerText={romanizationLayerText}
             onRomanizationLayerChange={handleRomanizationLayerChange}
             showTranslationLayer={showTranslationLayer}
-            onShowTranslationLayerChange={setShowTranslationLayer}
+            onShowTranslationLayerChange={handleTranslationVisibilityChange}
             showRomanizationLayer={showRomanizationLayer}
-            onShowRomanizationLayerChange={setShowRomanizationLayer}
+            onShowRomanizationLayerChange={handleRomanizationVisibilityChange}
           />
           </div>
         </div>
@@ -1599,21 +1656,20 @@ export function App() {
         playerCommand={playerCommand}
         health={health}
         statusMessage={statusMessage}
-        onPlaybackChange={(nextLoadedId, nextTimeMs, nextPlaying) => {
-          setLoadedTrackId(nextLoadedId)
-          setPlaybackTimeMs(nextTimeMs)
-          setIsPlaying(nextPlaying)
+        onPlaybackChange={(loadedTrackId, timeMs, isPlaying) => {
+          setLoadedTrackId(loadedTrackId)
+          setPlaybackTimeMs(timeMs)
+          setIsPlaying(isPlaying)
         }}
         onPlayerError={(message) => setBannerError(message)}
       />
 
-      {/* AI provider settings (File > Settings… / Ctrl+, / gear in Find + Layers) */}
       <SettingsModal
         open={settingsOpen}
-        settings={aiSettings}
         onClose={() => setSettingsOpen(false)}
         onSave={handleSaveAiSettings}
         onClearKey={handleClearAiKey}
+        settings={aiSettings}
       />
     </div>
   )
