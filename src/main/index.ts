@@ -381,7 +381,24 @@ function validateSaveDraft(payload: unknown): SaveDraftRequest {
   if (typeof candidate.lyrics !== 'string') {
     throw new Error('Draft payload must include lyrics text')
   }
-  if (Buffer.byteLength(candidate.lyrics, 'utf8') > MAX_LYRICS_BYTES) {
+  // Optional secondary layers: validated as strings when present.
+  for (const layer of ['translation', 'romanization'] as const) {
+    const value = candidate[layer]
+    if (value !== undefined && typeof value !== 'string') {
+      throw new Error(`Draft ${layer} must be a string when provided`)
+    }
+  }
+  const translation = typeof candidate.translation === 'string' ? candidate.translation : undefined
+  const romanization =
+    typeof candidate.romanization === 'string' ? candidate.romanization : undefined
+
+  // The 1 MiB budget covers the *combined* UTF-8 bytes of every layer so one
+  // draft can never balloon the on-disk record.
+  const combinedBytes =
+    Buffer.byteLength(candidate.lyrics, 'utf8') +
+    Buffer.byteLength(translation ?? '', 'utf8') +
+    Buffer.byteLength(romanization ?? '', 'utf8')
+  if (combinedBytes > MAX_LYRICS_BYTES) {
     throw new Error('Lyrics payload exceeds 1 MiB limit')
   }
   const status = candidate.status
@@ -391,6 +408,8 @@ function validateSaveDraft(payload: unknown): SaveDraftRequest {
   return {
     trackId: candidate.trackId,
     lyrics: candidate.lyrics,
+    ...(translation === undefined ? {} : { translation }),
+    ...(romanization === undefined ? {} : { romanization }),
     ...(status === undefined ? {} : { status })
   }
 }

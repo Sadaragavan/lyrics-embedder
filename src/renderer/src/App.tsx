@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import {
   AlertCircle,
-  CheckCircle2,
   Columns2,
-  Eye,
   FileCode,
   Layers,
   PanelLeftClose,
@@ -25,7 +23,7 @@ import type {
   TrackRecord,
   WorkspaceMode
 } from '@shared/ipc'
-import { normalizeLrc, parseLrc } from '@shared/lrc'
+import { normalizeLrc, parseLrc, stackLrcLayers } from '@shared/lrc'
 import { findActiveLineIndices } from '@shared/lyricsSync'
 import {
   applyTrackClick,
@@ -43,6 +41,11 @@ import { LibrarySidebar } from './components/LibrarySidebar'
 import { LyricsEditorPanel } from './components/LyricsEditorPanel'
 import { TrackTable } from './components/TrackTable'
 import type { PlayerCommand, SeekRequest, TrackEmbedStatus } from './types'
+
+/** Debounce for draft auto-saves (primary + translation + romanization). */
+const AUTO_SAVE_DEBOUNCE_MS = 500
+/** How long transient info/success messages stay in the player dock. */
+const STATUS_MESSAGE_TTL_MS = 4000
 
 const SIDEBAR_WIDTH_KEY = 'lyrics-embedder:sidebar-width'
 const SIDEBAR_MIN_WIDTH = 280
@@ -89,13 +92,20 @@ export function App() {
   const [selection, setSelection] = useState<TrackSelectionState>(createEmptySelectionState)
   const [draftTexts, setDraftTexts] = useState<Map<string, string>>(() => new Map())
   const [draftTrackIds, setDraftTrackIds] = useState<Set<string>>(() => new Set())
-  const [dirtyTrackIds, setDirtyTrackIds] = useState<Set<string>>(() => new Set())
+  /** Sticky draft ids for tracks whose layers were loaded from disk. */
+  const [layerDraftTrackIds, setLayerDraftTrackIds] = useState<Set<string>>(() => new Set())
   const [preserveWordTags, setPreserveWordTags] = useState(false)
   /** Live preview text emitted by the editor (primary or stacked layers). */
   const [livePreview, setLivePreview] = useState<{ trackId: string; text: string } | null>(null)
   /** Translation + romanization layers lifted so native menu actions can drive them. */
   const [secondaryLayerText, setSecondaryLayerText] = useState('')
   const [romanizationLayerText, setRomanizationLayerText] = useState('')
+  /**
+   * Layer visibility toggles. They control what the live preview shows *and*
+   * which layers get stacked into an embed, but never touch the primary text.
+   */
+  const [showTranslationLayer, setShowTranslationLayer] = useState(true)
+  const [showRomanizationLayer, setShowRomanizationLayer] = useState(true)
 
   const [searchTitle, setSearchTitle] = useState('')
   const [searchArtist, setSearchArtist] = useState('')
@@ -118,7 +128,7 @@ export function App() {
   const [sidebarVisible, setSidebarVisible] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(() => readStoredSidebarWidth())
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('edit')
-  const [editorLayout, setEditorLayout] = useState<EditorLayout>('split')
+  const [editorLayout, setEditorLayout] = useState<EditorLayout>('live')
 
   // Draggable split divider between the library sidebar and the workspace.
   const dividerDragRef = useRef<{ startX: number; startWidth: number } | null>(null)
@@ -160,12 +170,23 @@ export function App() {
   const [playerCommand, setPlayerCommand] = useState<PlayerCommand | null>(null)
 
   const [bannerError, setBannerError] = useState<string | null>(null)
-  const [bannerStatus, setBannerStatus] = useState<string | null>(null)
+  /** Transient info/success message shown in the player dock's status slot. */
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
+  /** `saving` while a debounced auto-save is in flight, `saved` after it lands. */
+  const [autoSaveState, setAutoSaveState] = useState<'idle' | 'saving' | 'saved'>('idle')
 
   const tracksRef = useRef(tracks)
   tracksRef.current = tracks
   const draftTextsRef = useRef(draftTexts)
   draftTextsRef.current = draftTexts
+  /** Latest layer texts, read synchronously by flush/embed helpers. */
+  const layerTextsRef = useRef({ translation: '', romanization: '' })
+  layerTextsRef.current = { translation: secondaryLayerText, romanization: romanizationLayerText }
+  /** Draft id known to exist on disk for the focused track (sticky per track). */
+  const knownDraftIdRef = useRef<string | null>(null)
+  const focusedTrackIdRef = useRef<string | null>(null)
+  const currentSignatureRef = useRef('')
+  const lastSavedSignatureRef = useRef<string | null>(null)
   /** Invalidates in-flight candidate searches when focus changes. */
   const searchNonceRef = useRef(0)
   /**
@@ -204,11 +225,30 @@ export function App() {
 
   const focusedTrackId = focusedTrack?.id ?? null
 
-  // Reset lifted layer text whenever the focused track changes.
-  useEffect(() => {
-    setSecondaryLayerText('')
-    setRomanizationLayerText('')
-  }, [focusedTrackId])
+  /** Draft id for the focused track, sticky while its layers are on screen. */
+  const focusedDraftId = useMemo(() => {
+    if (!focusedTrack) return null
+    return focusedTrack.draftId ?? (layerDraftTrackIds.has(focusedTrack.id) ? focusedTrack.id : null)
+  }, [focusedTrack, layerDraftTrackIds])
+
+  /**
+   * Unsaved-change tracking for the auto-save indicator. `dirtyLyrics` mirrors
+   * the edited primary text; `layerEpoch` bumps on every layer edit (including
+   * swaps that leave the text unchanged).
+   */
+  const dirtyLyrics = focusedTrack ? focusedLyricsText : ''
+  const [layerEpoch, setLayerEpoch] = useState(0)
+  const [lastSavedSignature, setLastSavedSignature] = useState<string | null>(null)
+  const currentSignature =
+    focusedTrackId === null
+      ? ''
+      : `${focusedTrackId}\u0000${dirtyLyrics}\u0000${layerEpoch}`
+
+  // Mirror async-read values into refs so debounced saves and flushes always see
+  // the latest focused track / signature without re-created closures.
+  focusedTrackIdRef.current = focusedTrackId
+  currentSignatureRef.current = currentSignature
+  lastSavedSignatureRef.current = lastSavedSignature
 
   /**
    * Lyrics text currently driving the audio player's active lines.
@@ -252,10 +292,9 @@ export function App() {
   const menuSyncState = useMemo<MenuSyncState>(() => {
     return {
       hasFocusedTrack: focusedTrack !== null,
-      hasDraft: focusedTrack
-        ? Boolean(focusedTrack.draftId || draftTrackIds.has(focusedTrack.id))
-        : false,
-      isDirty: focusedTrack ? dirtyTrackIds.has(focusedTrack.id) : false,
+      hasDraft: focusedDraftId !== null,
+      // Drafts auto-save, so the native menu never shows a "dirty" draft state.
+      isDirty: false,
       hasLyrics: Boolean(focusedLyricsText),
       workerReady: Boolean(health?.ready),
       preserveWordTags,
@@ -270,8 +309,7 @@ export function App() {
     }
   }, [
     focusedTrack,
-    draftTrackIds,
-    dirtyTrackIds,
+    focusedDraftId,
     focusedLyricsText,
     health,
     preserveWordTags,
@@ -289,6 +327,18 @@ export function App() {
     void window.api.syncMenuState(menuSyncState)
   }, [menuSyncState])
 
+  // Focusing a new track resets the transient status slot.
+  useEffect(() => {
+    setStatusMessage(null)
+  }, [focusedTrackId])
+
+  // Transient info/success messages clear themselves after 4 s.
+  useEffect(() => {
+    if (statusMessage === null) return
+    const timer = setTimeout(() => setStatusMessage(null), STATUS_MESSAGE_TTL_MS)
+    return () => clearTimeout(timer)
+  }, [statusMessage])
+
   const applyFetchedCandidate = useCallback(
     async (trackId: string, candidate: LyricsCandidate): Promise<boolean> => {
       const text = candidate.syncedLyrics ?? candidate.plainLyrics
@@ -305,11 +355,15 @@ export function App() {
           next.add(trackId)
           return next
         })
-        setDirtyTrackIds((prev) => {
+        setLayerDraftTrackIds((prev) => {
           const next = new Set(prev)
-          next.delete(trackId)
+          next.add(trackId)
           return next
         })
+        if (trackId === focusedTrackIdRef.current) {
+          setLastSavedSignature(currentSignatureRef.current)
+          setAutoSaveState('saved')
+        }
         setTracks((prev) =>
           prev.map((track) => (track.id === trackId ? { ...track, draftId: draft.id } : track))
         )
@@ -399,23 +453,41 @@ export function App() {
     }
   }, [applyFetchedCandidate])
 
-  // Load persisted draft when focusing a track not yet cached in draftTexts
+  /**
+   * Restore the persisted draft (primary + translation + romanization) when the
+   * focused track has one on disk. Switching tracks therefore never drops the
+   * translation/romanization layers.
+   */
   useEffect(() => {
-    const trackId = selection.focusedId
-    if (!trackId) return
-    if (draftTextsRef.current.has(trackId)) return
-    const track = tracksRef.current.find((t) => t.id === trackId)
-    if (!track?.draftId) return
+    setStatusMessage((prev) => (prev === null ? prev : null))
+    setAutoSaveState('idle')
+    setLastSavedSignature(null)
+    if (!focusedTrackId) {
+      knownDraftIdRef.current = null
+      return
+    }
+    const track = tracksRef.current.find((candidate) => candidate.id === focusedTrackId)
+    if (!track?.draftId) {
+      knownDraftIdRef.current = null
+      return
+    }
+    knownDraftIdRef.current = track.draftId
 
     let cancelled = false
     void window.api
-      .getDraft(trackId)
+      .getDraft(focusedTrackId)
       .then((draft) => {
         if (cancelled || !draft) return
         setDraftTexts((prev) => {
-          if (prev.has(trackId)) return prev
           const next = new Map(prev)
-          next.set(trackId, draft.lyrics)
+          next.set(focusedTrackId, draft.lyrics)
+          return next
+        })
+        setSecondaryLayerText(draft.translation ?? '')
+        setRomanizationLayerText(draft.romanization ?? '')
+        setLayerDraftTrackIds((prev) => {
+          const next = new Set(prev)
+          next.add(focusedTrackId)
           return next
         })
       })
@@ -424,7 +496,28 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [selection.focusedId])
+  }, [focusedTrackId])
+
+  /**
+   * Debounced auto-save (500 ms). Drafts are never saved by hand: any edit to the
+   * primary text, translation, or romanization schedules a write for the focused
+   * track. `flushAutoSave` runs the pending write immediately before switching
+   * tracks or embedding.
+   */
+  useEffect(() => {
+    if (!focusedTrackId) return
+    if (currentSignature === lastSavedSignature) return
+    const track = tracksRef.current.find((candidate) => candidate.id === focusedTrackId)
+    if (!track) return
+    if (dirtyLyrics.trim().length === 0) return
+
+    const timer = setTimeout(() => {
+      void persistDraftNow(focusedTrackId)
+    }, AUTO_SAVE_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+    // `currentSignature` captures track + primary text + layer epoch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSignature, lastSavedSignature, focusedTrackId])
 
   // Pre-fill the candidate sifter from the focused track and reset stale results.
   useEffect(() => {
@@ -495,11 +588,27 @@ export function App() {
     setBannerError(null)
     const applied = await applyFetchedCandidate(focusedTrack.id, result)
     if (applied) {
-      setBannerStatus(
-        `Loaded ${result.providerId === 'lrclib' ? 'LRCLIB' : 'local .lrc'} candidate as draft.`
+      // Loading a candidate persists it as the draft, then returns to editing.
+      await persistDraftNow(focusedTrack.id)
+      setStatusMessage(
+        `Loaded ${result.providerId === 'lrclib' ? 'LRCLIB' : 'local .lrc'} candidate as the primary lyrics.`
       )
+      setWorkspaceMode('edit')
     }
   }
+
+  /**
+   * Opening Find with no results yet kicks off the candidate search once, so the
+   * mode is never an empty panel waiting on a click.
+   */
+  useEffect(() => {
+    if (workspaceMode !== 'find') return
+    if (searchSearched || searchLoading) return
+    if (!focusedTrackId) return
+    void handleSearchCandidates()
+    // Only re-run when the mode or the search bookkeeping changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceMode, searchSearched, searchLoading, focusedTrackId])
 
   const lastFetchError = useMemo(() => {
     for (const progress of fetchProgressMap.values()) {
@@ -523,10 +632,10 @@ export function App() {
       if (!folder) return
       const added = await window.api.addRoot({ path: folder })
       setRoots(await window.api.getRoots())
-      setBannerStatus(`Added root "${added.name}". Scanning...`)
+      setStatusMessage(`Added root "${added.name}". Scanning...`)
       setScanning(true)
       await window.api.scanLibrary({ rootId: added.id })
-      setBannerStatus(`Scanned "${added.name}".`)
+      setStatusMessage(`Scanned "${added.name}".`)
     } catch (error) {
       setScanning(false)
       setBannerError(error instanceof Error ? error.message : String(error))
@@ -560,7 +669,7 @@ export function App() {
 
   async function handleScan(rootId?: string) {
     setBannerError(null)
-    setBannerStatus(null)
+    setStatusMessage(null)
     setScanning(true)
     try {
       const result = await window.api.scanLibrary(rootId ? { rootId } : undefined)
@@ -579,7 +688,7 @@ export function App() {
           nextTracks.map((t) => t.id)
         )
       )
-      setBannerStatus(`Scan complete (${result.tracks.length} tracks indexed).`)
+      setStatusMessage(`Scan complete (${result.tracks.length} tracks indexed).`)
     } catch (error) {
       setBannerError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -588,6 +697,10 @@ export function App() {
   }
 
   function handleRowClick(trackId: string, modifiers: SelectionClickModifiers) {
+    // Focusing a different track must not lose the pending draft write.
+    if (trackId !== focusedTrackIdRef.current) {
+      void flushAutoSave(focusedTrackIdRef.current)
+    }
     setSelection((prev) => applyTrackClick(prev, visibleTrackIds, trackId, modifiers))
   }
 
@@ -599,42 +712,78 @@ export function App() {
       next.set(trackId, nextLyrics)
       return next
     })
-    setDirtyTrackIds((prev) => {
-      const next = new Set(prev)
-      next.add(trackId)
-      return next
-    })
   }
 
-  async function handleSaveDraft(trackId: string, lyrics: string) {
-    setBannerError(null)
+  function handleSecondaryLayerChange(next: string) {
+    setSecondaryLayerText(next)
+    setLayerEpoch((prev) => prev + 1)
+  }
+
+  function handleRomanizationLayerChange(next: string) {
+    setRomanizationLayerText(next)
+    setLayerEpoch((prev) => prev + 1)
+  }
+
+  /**
+   * Writes the focused track's primary + layer texts as a draft.
+   * Returns true when a draft exists on disk afterwards.
+   */
+  async function persistDraftNow(trackId: string): Promise<boolean> {
+    const lyricsOverride = draftTextsRef.current.get(trackId)
+    const track = tracksRef.current.find((candidate) => candidate.id === trackId)
+    const lyrics = lyricsOverride ?? track?.lyrics ?? ''
+    if (lyrics.trim().length === 0) return false
+
+    const { translation, romanization } =
+      trackId === focusedTrackIdRef.current
+        ? layerTextsRef.current
+        : { translation: '', romanization: '' }
+
+    setAutoSaveState('saving')
     try {
-      const draft = await window.api.saveDraft({ trackId, lyrics, status: 'pending' })
-      setDraftTexts((prev) => {
-        const next = new Map(prev)
-        next.set(trackId, lyrics)
-        return next
+      const draft = await window.api.saveDraft({
+        trackId,
+        lyrics,
+        translation,
+        romanization,
+        status: 'pending'
       })
+      knownDraftIdRef.current = draft.id
       setDraftTrackIds((prev) => {
         const next = new Set(prev)
         next.add(trackId)
         return next
       })
-      setDirtyTrackIds((prev) => {
+      setLayerDraftTrackIds((prev) => {
         const next = new Set(prev)
-        next.delete(trackId)
+        next.add(trackId)
         return next
       })
       setTracks((prev) =>
         prev.map((t) => (t.id === trackId ? { ...t, draftId: draft.id } : t))
       )
-      setBannerStatus('Draft saved.')
+      if (trackId === focusedTrackIdRef.current) {
+        setLastSavedSignature(currentSignatureRef.current)
+        setAutoSaveState('saved')
+      }
+      return true
     } catch (error) {
       setBannerError(error instanceof Error ? error.message : String(error))
+      if (trackId === focusedTrackIdRef.current) setAutoSaveState('idle')
+      return false
     }
   }
 
-  async function handleDiscardDraft(trackId: string) {
+  /** Runs any pending debounced save immediately (before switching/embedding). */
+  async function flushAutoSave(trackId?: string | null): Promise<void> {
+    const target = trackId ?? focusedTrackIdRef.current
+    if (!target) return
+    if (currentSignatureRef.current === lastSavedSignatureRef.current) return
+    await persistDraftNow(target)
+  }
+
+  /** Revert to the lyrics embedded in the file, clearing every layer. */
+  async function handleRevertToEmbedded(trackId: string) {
     setBannerError(null)
     try {
       await window.api.deleteDraft(trackId)
@@ -649,15 +798,23 @@ export function App() {
         next.delete(trackId)
         return next
       })
-      setDirtyTrackIds((prev) => {
+      setLayerDraftTrackIds((prev) => {
         const next = new Set(prev)
         next.delete(trackId)
         return next
       })
+      if (trackId === focusedTrackIdRef.current) {
+        knownDraftIdRef.current = null
+        setSecondaryLayerText('')
+        setRomanizationLayerText('')
+        setLayerEpoch((prev) => prev + 1)
+        setLastSavedSignature(null)
+        setAutoSaveState('idle')
+        setStatusMessage('Reverted to the lyrics embedded in the file.')
+      }
       setTracks((prev) =>
         prev.map((t) => (t.id === trackId ? { ...t, draftId: undefined } : t))
       )
-      setBannerStatus('Draft discarded.')
     } catch (error) {
       setBannerError(error instanceof Error ? error.message : String(error))
     }
@@ -674,18 +831,14 @@ export function App() {
         setBannerError('Selected .lrc file was empty, symlinked, or exceeded 1 MiB.')
         return
       }
-      await handleSaveDraft(focusedTrack.id, content)
-      setBannerStatus(`Imported ${selected}`)
-    } catch (error) {
-      setBannerError(error instanceof Error ? error.message : String(error))
-    }
-  }
-
-  async function handleFetchFocused() {
-    if (!focusedTrack) return
-    setBannerError(null)
-    try {
-      await window.api.lyricsFetch(toFetchRequest(focusedTrack))
+      setDraftTexts((prev) => {
+        const next = new Map(prev)
+        next.set(focusedTrack.id, content)
+        return next
+      })
+      setLayerEpoch((prev) => prev + 1)
+      await persistDraftNow(focusedTrack.id)
+      setStatusMessage(`Imported ${selected}`)
     } catch (error) {
       setBannerError(error instanceof Error ? error.message : String(error))
     }
@@ -695,7 +848,7 @@ export function App() {
     const targets = filteredTracks.filter((track) => selection.selectedIds.has(track.id))
     if (targets.length === 0) return
     setBannerError(null)
-    setBannerStatus(`Fetching lyrics for ${targets.length} track(s)...`)
+    setStatusMessage(`Fetching lyrics for ${targets.length} track(s)...`)
     try {
       await window.api.lyricsFetchBatch(targets.map(toFetchRequest))
     } catch (error) {
@@ -735,11 +888,6 @@ export function App() {
         next.delete(track.id)
         return next
       })
-      setDirtyTrackIds((prev) => {
-        const next = new Set(prev)
-        next.delete(track.id)
-        return next
-      })
       if (refreshed) {
         setTracks((prev) =>
           prev.map((t) =>
@@ -768,15 +916,42 @@ export function App() {
     }
   }
 
+  /**
+   * Merges the primary lyrics with every enabled, non-empty secondary layer so a
+   * single embedded tag carries translation/romanization as same-timestamp lines.
+   */
+  function buildEmbedPayload(
+    primary: string,
+    translation: string,
+    romanization: string,
+    translateEnabled: boolean,
+    romanizeEnabled: boolean
+  ): string {
+    const layers: string[] = []
+    if (translateEnabled && translation.trim().length > 0) layers.push(translation)
+    if (romanizeEnabled && romanization.trim().length > 0) layers.push(romanization)
+    if (layers.length === 0) return primary
+    return stackLrcLayers([primary, ...layers], { preserveWordTags })
+  }
+
   async function handleEmbedFocused() {
     if (!focusedTrack || embedding) return
     setEmbedding(true)
     setBannerError(null)
-    setBannerStatus(null)
+    setStatusMessage(null)
     try {
-      const ok = await embedSingleTrack(focusedTrack, focusedLyricsText)
+      // Never embed ahead of an in-flight edit.
+      await flushAutoSave(focusedTrack.id)
+      const payload = buildEmbedPayload(
+        focusedLyricsText,
+        secondaryLayerText,
+        romanizationLayerText,
+        showTranslationLayer,
+        showRomanizationLayer
+      )
+      const ok = await embedSingleTrack(focusedTrack, payload)
       if (ok) {
-        setBannerStatus(`Embedded lyrics for "${focusedTrack.title}".`)
+        setStatusMessage(`Embedded lyrics for "${focusedTrack.title}".`)
       } else {
         setBannerError(`Failed to embed "${focusedTrack.title}".`)
       }
@@ -797,9 +972,19 @@ export function App() {
     try {
       for (const track of targets) {
         let payload = draftTextsRef.current.get(track.id)
+        let translation = ''
+        let romanization = ''
+        if (track.id === focusedTrackIdRef.current) {
+          // The focused track has live (possibly unsaved) layer text.
+          await flushAutoSave(track.id)
+          translation = layerTextsRef.current.translation
+          romanization = layerTextsRef.current.romanization
+        }
         if (payload === undefined && track.draftId) {
           const draft = await window.api.getDraft(track.id)
           payload = draft?.lyrics
+          translation = draft?.translation ?? ''
+          romanization = draft?.romanization ?? ''
         }
         if (payload === undefined) {
           payload = track.lyrics ?? ''
@@ -807,11 +992,18 @@ export function App() {
         if (payload.length === 0 && track.lyrics === null) {
           continue
         }
-        const ok = await embedSingleTrack(track, payload)
+        const merged = buildEmbedPayload(
+          payload,
+          translation,
+          romanization,
+          translation.trim().length > 0,
+          romanization.trim().length > 0
+        )
+        const ok = await embedSingleTrack(track, merged)
         if (ok) succeeded++
         else failed++
       }
-      setBannerStatus(
+      setStatusMessage(
         `Batch embed finished: ${succeeded} verified${failed > 0 ? `, ${failed} failed` : ''}.`
       )
     } finally {
@@ -830,11 +1022,8 @@ export function App() {
       case 'import-lrc':
         await handleImportLrc()
         break
-      case 'save-draft':
-        if (focusedTrack) await handleSaveDraft(focusedTrack.id, focusedLyricsText)
-        break
       case 'discard-draft':
-        if (focusedTrack) await handleDiscardDraft(focusedTrack.id)
+        if (focusedTrack) await handleRevertToEmbedded(focusedTrack.id)
         break
       case 'embed-current-track':
         if (focusedTrack && !embedding) await handleEmbedFocused()
@@ -868,11 +1057,8 @@ export function App() {
       case 'layout-raw':
         setEditorLayout('raw')
         break
-      case 'layout-split':
-        setEditorLayout('split')
-        break
-      case 'layout-preview':
-        setEditorLayout('preview')
+      case 'layout-live':
+        setEditorLayout('live')
         break
       case 'toggle-play-pause':
         setPlayerCommand({ kind: 'toggle', nonce: Date.now() + Math.random() })
@@ -904,34 +1090,23 @@ export function App() {
   return (
     <div className="relative flex h-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100">
       {/*
-        Transient status toast. It floats over the workspace instead of taking a
-        permanent row so the 1366x768 layout keeps zero top chrome.
+        Errors stay in normal flex flow above <main> so they can never cover the
+        editor; info/success messages live in the player dock's status slot.
       */}
-      {(bannerError || bannerStatus) && (
+      {bannerError && (
         <div
-          role="status"
-          className={`absolute left-1/2 top-2 z-40 flex w-[min(560px,90vw)] -translate-x-1/2 items-center justify-between gap-2 rounded-md border px-3 py-1.5 text-xs shadow-lg shadow-black/50 ${
-            bannerError
-              ? 'border-red-900/80 bg-red-950/60 text-red-200'
-              : 'border-emerald-900/80 bg-emerald-950/40 text-emerald-200'
-          }`}
+          role="alert"
+          className="flex shrink-0 items-center justify-between gap-2 border-b border-red-900/80 bg-red-950/60 px-4 py-1.5 text-xs text-red-200"
         >
-          <div className="flex items-center gap-2 min-w-0">
-            {bannerError ? (
-              <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-400" />
-            ) : (
-              <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
-            )}
-            <span className="truncate">{bannerError ?? bannerStatus}</span>
+          <div className="flex min-w-0 items-center gap-2">
+            <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-400" />
+            <span className="truncate">{bannerError}</span>
           </div>
           <button
             type="button"
-            aria-label="Dismiss message"
-            onClick={() => {
-              setBannerError(null)
-              setBannerStatus(null)
-            }}
-            className="text-zinc-400 hover:text-zinc-100"
+            aria-label="Dismiss error"
+            onClick={() => setBannerError(null)}
+            className="shrink-0 text-zinc-400 hover:text-zinc-100"
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -1081,30 +1256,31 @@ export function App() {
             >
               <button
                 type="button"
-                aria-pressed={editorLayout === 'raw'}
-                title="Raw editor layout"
-                onClick={() => setEditorLayout('raw')}
-                className={`p-1 ${editorLayout === 'raw' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}
-              >
-                <FileCode className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                aria-pressed={editorLayout === 'split'}
-                title="Split editor layout (default)"
-                onClick={() => setEditorLayout('split')}
-                className={`border-l border-zinc-700 p-1 ${editorLayout === 'split' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}
+                aria-pressed={editorLayout === 'live'}
+                title="Live editor: editable synced rows with inline translation/romanization"
+                onClick={() => setEditorLayout('live')}
+                className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium ${
+                  editorLayout === 'live'
+                    ? 'bg-zinc-700 text-zinc-100'
+                    : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                }`}
               >
                 <Columns2 className="h-3.5 w-3.5" />
+                Live
               </button>
               <button
                 type="button"
-                aria-pressed={editorLayout === 'preview'}
-                title="Preview-focused editor layout"
-                onClick={() => setEditorLayout('preview')}
-                className={`border-l border-zinc-700 p-1 ${editorLayout === 'preview' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}
+                aria-pressed={editorLayout === 'raw'}
+                title="Raw LRC text: single monospace editor"
+                onClick={() => setEditorLayout('raw')}
+                className={`inline-flex items-center gap-1 border-l border-zinc-700 px-2 py-1 text-[11px] font-medium ${
+                  editorLayout === 'raw'
+                    ? 'bg-zinc-700 text-zinc-100'
+                    : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                }`}
               >
-                <Eye className="h-3.5 w-3.5" />
+                <FileCode className="h-3.5 w-3.5" />
+                Raw Text
               </button>
             </div>
           </div>
@@ -1119,7 +1295,8 @@ export function App() {
                 ? Boolean(focusedTrack.draftId || draftTrackIds.has(focusedTrack.id))
                 : false
             }
-            isDirty={focusedTrack ? dirtyTrackIds.has(focusedTrack.id) : false}
+            autoSaveState={autoSaveState}
+            onEditorLayoutChange={setEditorLayout}
             preserveWordTags={preserveWordTags}
             onPreserveWordTagsChange={setPreserveWordTags}
             onLyricsChange={handleLyricsChange}
@@ -1135,16 +1312,9 @@ export function App() {
             onSeekToMs={(trackId, timeMs) =>
               setSeekRequest({ trackId, timeMs, nonce: Date.now() + Math.random() })
             }
-            onFetchFocused={() => void handleFetchFocused()}
-            onCancelFetchFocused={() => {
-              if (focusedTrack) void window.api.lyricsCancelFetch(focusedTrack.id)
-            }}
             onImportLrc={() => void handleImportLrc()}
-            onSaveDraft={() => {
-              if (focusedTrack) void handleSaveDraft(focusedTrack.id, focusedLyricsText)
-            }}
-            onDiscardDraft={() => {
-              if (focusedTrack) void handleDiscardDraft(focusedTrack.id)
+            onRevert={() => {
+              if (focusedTrack) void handleRevertToEmbedded(focusedTrack.id)
             }}
             onEmbedFocused={() => void handleEmbedFocused()}
             onNormalize={() => {
@@ -1171,9 +1341,13 @@ export function App() {
             onSearchCandidates={() => void handleSearchCandidates()}
             onLoadCandidate={(result) => void handleLoadCandidate(result)}
             secondaryLayerText={secondaryLayerText}
-            onSecondaryLayerChange={setSecondaryLayerText}
+            onSecondaryLayerChange={handleSecondaryLayerChange}
             romanizationLayerText={romanizationLayerText}
-            onRomanizationLayerChange={setRomanizationLayerText}
+            onRomanizationLayerChange={handleRomanizationLayerChange}
+            showTranslationLayer={showTranslationLayer}
+            onShowTranslationLayerChange={setShowTranslationLayer}
+            showRomanizationLayer={showRomanizationLayer}
+            onShowRomanizationLayerChange={setShowRomanizationLayer}
           />
           </div>
         </div>
@@ -1185,6 +1359,7 @@ export function App() {
         seekRequest={seekRequest}
         playerCommand={playerCommand}
         health={health}
+        statusMessage={statusMessage}
         onPlaybackChange={(nextLoadedId, nextTimeMs, nextPlaying) => {
           setLoadedTrackId(nextLoadedId)
           setPlaybackTimeMs(nextTimeMs)

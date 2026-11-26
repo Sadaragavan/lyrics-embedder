@@ -1,16 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ChevronDown,
   Clock,
-  Download,
   FileUp,
   Layers,
   Loader2,
+  Plus,
+  RotateCcw,
   Search,
   SlidersHorizontal,
   Sparkles,
   Trash2,
-  XCircle
+  X
 } from 'lucide-react'
 import type {
   EditorLayout,
@@ -27,6 +28,14 @@ import {
   stackLrcLayers
 } from '@shared/lrc'
 import { findActiveLineIndices, hasSyncedTimestamps } from '@shared/lyricsSync'
+import {
+  isValidInlineTimestamp,
+  parseEditableRows,
+  parseInlineTimestamp,
+  serializeEditableLayer,
+  serializeEditableRows,
+  type EditableLrcRow
+} from '@shared/lrcEditor'
 import type { TrackEmbedStatus } from '../types'
 import { resolveLyricsSourceChip, type LyricsSourceKind } from './lyricsSourceChip'
 
@@ -35,7 +44,8 @@ export interface LyricsEditorPanelProps {
   selectedCount: number
   lyricsText: string
   hasDraft: boolean
-  isDirty: boolean
+  /** Auto-save indicator state (`saving` / `saved` / `idle`). */
+  autoSaveState: 'idle' | 'saving' | 'saved'
   preserveWordTags: boolean
   onPreserveWordTagsChange: (value: boolean) => void
   onLyricsChange: (nextLyrics: string) => void
@@ -45,11 +55,9 @@ export interface LyricsEditorPanelProps {
   loadedTrackId: string | null
   playbackTimeMs: number
   onSeekToMs: (trackId: string, timeMs: number) => void
-  onFetchFocused: () => void
-  onCancelFetchFocused: () => void
   onImportLrc: () => void
-  onSaveDraft: () => void
-  onDiscardDraft: () => void
+  /** Revert to the lyrics embedded in the file (deletes the draft). */
+  onRevert: () => void
   onEmbedFocused: () => void
   onNormalize: () => void
   /** Emits the live preview text (primary, or stacked when layers are present). */
@@ -59,12 +67,19 @@ export interface LyricsEditorPanelProps {
   onModeChange: (mode: WorkspaceMode) => void
   /** Edit-mode layout from the layout toggle / native View menu. */
   editorLayout: EditorLayout
+  /** Layout toggle handler (the panel's Raw Text button drives App state). */
+  onEditorLayoutChange: (layout: EditorLayout) => void
   /** Primary text copied into the translation layer (controlled by App/menu). */
   secondaryLayerText: string
   onSecondaryLayerChange: (text: string) => void
   /** Primary text copied into the romanization layer (controlled by App/menu). */
   romanizationLayerText: string
   onRomanizationLayerChange: (text: string) => void
+  /** Layer visibility (preview + embed merging); never overwrites the primary. */
+  showTranslationLayer: boolean
+  onShowTranslationLayerChange: (value: boolean) => void
+  showRomanizationLayer: boolean
+  onShowRomanizationLayerChange: (value: boolean) => void
   // --- Candidate sifter ---
   searchTitle: string
   onSearchTitleChange: (value: string) => void
@@ -81,8 +96,6 @@ export interface LyricsEditorPanelProps {
   onSearchCandidates: () => void
   onLoadCandidate: (result: LyricsSearchResult) => void
 }
-
-type PreviewMode = 'primary' | 'stacked'
 
 interface CandidateSiftingRowProps {
   result: LyricsSearchResult
@@ -248,7 +261,7 @@ export function LyricsEditorPanel({
   selectedCount,
   lyricsText,
   hasDraft,
-  isDirty,
+  autoSaveState,
   preserveWordTags,
   onPreserveWordTagsChange,
   onLyricsChange,
@@ -258,21 +271,23 @@ export function LyricsEditorPanel({
   loadedTrackId,
   playbackTimeMs,
   onSeekToMs,
-  onFetchFocused,
-  onCancelFetchFocused,
   onImportLrc,
-  onSaveDraft,
-  onDiscardDraft,
+  onRevert,
   onEmbedFocused,
   onNormalize,
   onPreviewTextChange,
   mode,
   onModeChange,
   editorLayout,
+  onEditorLayoutChange,
   secondaryLayerText,
   onSecondaryLayerChange,
   romanizationLayerText,
   onRomanizationLayerChange,
+  showTranslationLayer,
+  onShowTranslationLayerChange,
+  showRomanizationLayer,
+  onShowRomanizationLayerChange,
   searchTitle,
   onSearchTitleChange,
   searchArtist,
@@ -288,22 +303,28 @@ export function LyricsEditorPanel({
   onSearchCandidates,
   onLoadCandidate
 }: LyricsEditorPanelProps) {
-  const [previewMode, setPreviewMode] = useState<PreviewMode>('stacked')
   const [offsetInput, setOffsetInput] = useState('')
-  const [showTranslationLayer, setShowTranslationLayer] = useState(true)
-  const [showRomanizationLayer, setShowRomanizationLayer] = useState(true)
   const [selectedCandidateKey, setSelectedCandidateKey] = useState<string | null>(null)
-  const activeLineRef = useRef<HTMLButtonElement | null>(null)
+  /** Timestamp currently open for inline editing (row key), if any. */
+  const [editingTimestampKey, setEditingTimestampKey] = useState<number | null>(null)
+  const [timestampDraft, setTimestampDraft] = useState('')
+  const activeRowRef = useRef<HTMLDivElement | null>(null)
+  /**
+   * Rows the user inserted but has not typed into yet. They are serialized into
+   * the primary layer as empty lines so the new row survives the round-trip
+   * instead of vanishing on the next keystroke.
+   */
+  const pendingEmptyRowKeysRef = useRef<Set<number>>(new Set())
 
   const focusedTrackId = focusedTrack?.id ?? null
 
   // Reset transient view state when the focused track changes.
   useEffect(() => {
-    setPreviewMode('stacked')
     setOffsetInput('')
     setSelectedCandidateKey(null)
-    setShowTranslationLayer(true)
-    setShowRomanizationLayer(true)
+    setEditingTimestampKey(null)
+    setTimestampDraft('')
+    pendingEmptyRowKeysRef.current.clear()
   }, [focusedTrackId])
 
   const primaryLines = useMemo(
@@ -311,34 +332,117 @@ export function LyricsEditorPanel({
     [lyricsText, preserveWordTags]
   )
 
+  const hasSynced = hasSyncedTimestamps(lyricsText)
+  const hasPrimaryText = lyricsText.trim().length > 0
+  /** Plain (untimed) lyrics still get a clean editable textarea, never an empty box. */
+  const hasTimedLines = primaryLines.length > 0
+
   const hasTranslation = secondaryLayerText.trim().length > 0
   const hasRomanization = romanizationLayerText.trim().length > 0
 
-  const stackedOutput = useMemo(() => {
-    const layers = [
-      lyricsText,
-      showTranslationLayer ? secondaryLayerText : '',
-      showRomanizationLayer ? romanizationLayerText : ''
-    ].filter((layer) => layer.trim().length > 0)
-    if (layers.length <= 1) return ''
-    return stackLrcLayers(layers, { preserveWordTags })
+  /**
+   * Layer text that is currently *enabled*: only enabled, non-empty layers are
+   * stacked into the preview (and later into an embed). The primary is never
+   * modified by these toggles.
+   */
+  const enabledLayers = useMemo(() => {
+    const layers: string[] = []
+    if (showTranslationLayer && hasTranslation) layers.push(secondaryLayerText)
+    if (showRomanizationLayer && hasRomanization) layers.push(romanizationLayerText)
+    return layers
   }, [
-    lyricsText,
-    secondaryLayerText,
-    romanizationLayerText,
-    preserveWordTags,
     showTranslationLayer,
-    showRomanizationLayer
+    hasTranslation,
+    secondaryLayerText,
+    showRomanizationLayer,
+    hasRomanization,
+    romanizationLayerText
   ])
 
-  const livePreviewText =
-    previewMode === 'stacked' && stackedOutput.length > 0 ? stackedOutput : lyricsText
+  const stackedOutput = useMemo(() => {
+    if (enabledLayers.length === 0) return ''
+    return stackLrcLayers([lyricsText, ...enabledLayers], { preserveWordTags })
+  }, [lyricsText, enabledLayers, preserveWordTags])
+
+  const livePreviewText = stackedOutput.length > 0 ? stackedOutput : lyricsText
   const isStackedLive = livePreviewText !== lyricsText
 
   const previewLines = useMemo(
     () => parseLrc(livePreviewText, { preserveWordTags }),
     [livePreviewText, preserveWordTags]
   )
+
+  // Editable rows: the single source of truth for the live editor.
+  const editableRows = useMemo(
+    () => parseEditableRows(lyricsText, secondaryLayerText, romanizationLayerText, { preserveWordTags }),
+    [lyricsText, secondaryLayerText, romanizationLayerText, preserveWordTags]
+  )
+  // Write-back helpers: rows -> primary/translation/romanization text.
+  const commitRows = useCallback(
+    (rows: EditableLrcRow[]) => {
+      const pending = pendingEmptyRowKeysRef.current
+      for (const row of rows) {
+        if (row.text.trim().length > 0) pending.delete(row.key)
+      }
+      // Keep freshly inserted empty rows; drop untouched layer-only rows from
+      // the primary so stacking never duplicates content into it.
+      onLyricsChange(
+        serializeEditableRows(
+          rows.filter((row) => row.text.trim().length > 0 || pending.has(row.key)),
+          { preserveWordTags }
+        )
+      )
+      onSecondaryLayerChange(serializeEditableLayer(rows, 'translation', { preserveWordTags }))
+      onRomanizationLayerChange(serializeEditableLayer(rows, 'romanization', { preserveWordTags }))
+    },
+    [onLyricsChange, onSecondaryLayerChange, onRomanizationLayerChange, preserveWordTags]
+  )
+
+  function updateRow(
+    row: EditableLrcRow,
+    patch: Partial<Pick<EditableLrcRow, 'timeMs' | 'text' | 'translation' | 'romanization'>>
+  ) {
+    const nextKey = patch.timeMs !== undefined ? Math.round(patch.timeMs / 10) : row.key
+    if (nextKey !== row.key && pendingEmptyRowKeysRef.current.delete(row.key)) {
+      pendingEmptyRowKeysRef.current.add(nextKey)
+    }
+    const next = editableRows.map((candidate) =>
+      candidate.key === row.key ? { ...candidate, ...patch, key: nextKey } : candidate
+    )
+    next.sort((a, b) => a.timeMs - b.timeMs)
+    commitRows(next)
+  }
+
+  function insertRowAfter(row: EditableLrcRow | null) {
+    let nextTimeMs = row ? row.timeMs + 1000 : 0
+    // Nudge forward until the timestamp is free (rows are keyed by centiseconds).
+    const taken = new Set(editableRows.map((candidate) => Math.round(candidate.timeMs / 10)))
+    while (taken.has(Math.round(nextTimeMs / 10))) nextTimeMs += 10
+    const inserted: EditableLrcRow = {
+      key: Math.round(nextTimeMs / 10),
+      timeMs: nextTimeMs,
+      text: '',
+      translation: '',
+      romanization: '',
+      createsOnlyFromLayers: false
+    }
+    pendingEmptyRowKeysRef.current.add(inserted.key)
+    const next = [...editableRows, inserted].sort((a, b) => a.timeMs - b.timeMs)
+    commitRows(next)
+  }
+
+  function removeRow(row: EditableLrcRow) {
+    pendingEmptyRowKeysRef.current.delete(row.key)
+    commitRows(editableRows.filter((candidate) => candidate.key !== row.key))
+  }
+
+  function commitTimestampEdit(row: EditableLrcRow) {
+    const parsed = parseInlineTimestamp(timestampDraft)
+    setEditingTimestampKey(null)
+    setTimestampDraft('')
+    if (!parsed || parsed.timeMs === row.timeMs) return
+    updateRow(row, { timeMs: parsed.timeMs })
+  }
 
   useEffect(() => {
     if (!focusedTrackId) return
@@ -349,15 +453,26 @@ export function LyricsEditorPanel({
   const activeIndices = isTrackPlayingOrLoaded
     ? findActiveLineIndices(previewLines, playbackTimeMs)
     : []
-  const activeIndexSet = new Set(activeIndices)
   const firstActiveIndex = activeIndices.length > 0 ? activeIndices[0]! : -1
   const activeTimestampMs =
     firstActiveIndex >= 0 ? previewLines[firstActiveIndex]!.timeMs : null
+  /** Rows highlighted together (same timestamp after stacking). */
+  const activeRowKeys = useMemo(() => {
+    if (activeTimestampMs === null) return new Set<number>()
+    return new Set(
+      activeIndices.map((index) => previewLines[index]!.timeMs)
+    )
+  }, [activeIndices, activeTimestampMs, previewLines])
 
+  // Auto-scroll only when the active timestamp changes AND the user is not
+  // typing inside the editor.
   useEffect(() => {
-    if (activeLineRef.current && isTrackPlayingOrLoaded) {
-      activeLineRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-    }
+    if (!isTrackPlayingOrLoaded || activeTimestampMs === null) return
+    const activeElement = document.activeElement
+    const isEditing =
+      activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement
+    if (isEditing) return
+    activeRowRef.current?.scrollIntoView({ block: 'nearest' })
   }, [activeTimestampMs, isTrackPlayingOrLoaded])
 
   if (!focusedTrack) {
@@ -372,13 +487,7 @@ export function LyricsEditorPanel({
     )
   }
 
-  const isFetching = fetchProgress?.phase === 'fetching'
   const isEmbedding = embedStatus?.phase === 'embedding'
-  const hasSynced = hasSyncedTimestamps(lyricsText)
-  const hasPrimaryText = lyricsText.trim().length > 0
-  /** Plain (untimed) lyrics still preview as readable text, never an empty box. */
-  const hasTimedLines = primaryLines.length > 0
-  const plainOnlyText = hasPrimaryText && !hasTimedLines
 
   function handleNudgeOffset(deltaMs: number) {
     if (!Number.isFinite(deltaMs) || deltaMs === 0) return
@@ -422,6 +531,21 @@ export function LyricsEditorPanel({
     onModeChange('edit')
   }
 
+  /** Footer toggles change preview/embed visibility only, never the primary. */
+  function handleToggleTranslationLayer() {
+    onShowTranslationLayerChange(!showTranslationLayer)
+  }
+
+  function handleToggleRomanizationLayer() {
+    onShowRomanizationLayerChange(!showRomanizationLayer)
+  }
+
+  /** Revert deletes the draft, restores the embedded tags, and clears layers. */
+  function handleRevert() {
+    setEditingTimestampKey(null)
+    onRevert()
+  }
+
   // --- Active lyrics source chip (Limusic-style footer, left side) ---
   const hasDraftForTrack = hasDraft
   const trackLyricsSource = focusedTrack.lyricsSource
@@ -450,84 +574,162 @@ export function LyricsEditorPanel({
     selectedCandidate?.syncedLyrics ?? selectedCandidate?.plainLyrics ?? ''
 
   const previewIsClickable = hasTimedLines
-  // Captured after the null-guard above so the preview closure keeps a non-null type.
-  const focusedTrackIdSafe = focusedTrack.id
 
-  function renderSyncedPreview(extraClassName: string, showHeader = true) {
+  /** Editable text cell used for the primary line and its indented layers. */
+  function renderTextInput(
+    row: EditableLrcRow,
+    field: 'text' | 'translation' | 'romanization',
+    extraClassName: string
+  ) {
+    const value = row[field]
     return (
-      <div
-        className={`flex min-h-0 flex-col overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70 ${extraClassName}`}
-      >
-        {showHeader && (
-          <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-2.5 py-1 text-[11px]">
-            <span className="font-medium text-zinc-400">
-              Synced Preview{isStackedLive ? ' · stacked' : ''}
-              {previewIsClickable ? ' (click line to seek)' : ''}
-            </span>
-            <span className="text-[10px] tabular-nums text-zinc-500">
-              {previewLines.length} lines
-            </span>
-          </div>
-        )}
-        <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto p-1.5">
-          {previewLines.length === 0 ? (
-            plainOnlyText ? (
-              // No valid [mm:ss.xx] tags: show the plain text cleanly instead of
-              // an empty "No synced lines" placeholder box.
-              <pre className="whitespace-pre-wrap break-words p-1 font-sans text-xs leading-snug text-zinc-300">
-                {lyricsText}
-              </pre>
-            ) : (
-              <p className="p-2 text-xs text-zinc-500">
-                No lyrics yet. Fetch, search (Find), or paste `[mm:ss.xx]` lines.
+      <input
+        type="text"
+        value={value}
+        aria-label={`${field === 'text' ? 'Primary' : field === 'translation' ? 'Translation' : 'Romanization'} line at ${formatTimestamp(row.timeMs)}`}
+        placeholder={
+          field === 'text'
+            ? '(instrumental / empty line)'
+            : field === 'translation'
+              ? 'Translation…'
+              : 'Romanization…'
+        }
+        onChange={(event) => updateRow(row, { [field]: event.target.value })}
+        className={`min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-zinc-100 placeholder:text-zinc-600 hover:border-zinc-700 focus:border-emerald-500 focus:bg-zinc-950/70 focus:outline-none ${extraClassName}`}
+      />
+    )
+  }
+
+  /** Unified live synced editor: one editable row per timestamp. */
+  function renderLiveRows() {
+    const seekTrackId = focusedTrack?.id
+    if (!seekTrackId) return null
+    return (
+      <div className="flex min-h-0 flex-col overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70">
+        <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-2.5 py-1 text-[11px]">
+          <span className="font-medium text-zinc-400">
+            Live Editor{isStackedLive ? ' · stacked' : ''}
+            {previewIsClickable ? ' (click a timestamp to seek, double-click to edit)' : ''}
+          </span>
+          <span className="text-[10px] tabular-nums text-zinc-500">
+            {editableRows.length} rows
+          </span>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-1">
+          {editableRows.length === 0 ? (
+            <div className="space-y-2 p-2">
+              <p className="text-xs text-zinc-500">
+                No `[mm:ss.xx]` timestamps yet. Open <span className="text-zinc-300">Find</span> to
+                load synced lyrics, or switch to <span className="text-zinc-300">Raw Text</span> to
+                paste plain text.
               </p>
-            )
+            </div>
           ) : (
-            previewLines.map((line, index) => {
-              const isActive = activeTimestampMs !== null && line.timeMs === activeTimestampMs
-              const isFirstActive = isActive && index === firstActiveIndex
-              // Stacked layers share one timestamp: later lines are secondary.
-              const isSecondaryStack = activeIndices.length > 1 && activeIndexSet.has(index) && index !== firstActiveIndex
-              const interactive = previewIsClickable
+            editableRows.map((row) => {
+              const isActive = activeRowKeys.has(row.timeMs)
+              const isEditingTimestamp = editingTimestampKey === row.key
               return (
-                <button
-                  key={`${line.timeMs}-${index}`}
-                  ref={isFirstActive ? activeLineRef : undefined}
-                  type="button"
-                  disabled={!interactive}
-                  onClick={() => interactive && onSeekToMs(focusedTrackIdSafe, line.timeMs)}
-                  title={
-                    interactive
-                      ? `Seek to ${formatTimestamp(line.timeMs)} and play the preview`
-                      : 'Plain lyrics have no timestamp to seek to'
-                  }
-                  className={`flex w-full items-baseline gap-2 rounded px-2 text-left transition-colors ${
-                    isSecondaryStack ? 'py-0.5 text-[11px]' : 'py-1 text-xs'
-                  } ${
+                <div
+                  key={row.key}
+                  ref={isActive && row.timeMs === activeTimestampMs ? activeRowRef : undefined}
+                  className={`group flex gap-1 rounded px-1 py-0.5 ${
                     isActive
-                      ? isSecondaryStack
-                        ? 'bg-emerald-950/50 text-emerald-300/80 ring-1 ring-inset ring-emerald-800/50'
-                        : 'bg-emerald-950/80 text-emerald-200 ring-1 ring-inset ring-emerald-700/70'
-                      : interactive
-                        ? 'text-zinc-300 hover:bg-zinc-800/70'
-                        : 'cursor-default text-zinc-300'
+                      ? 'bg-emerald-950/70 ring-1 ring-inset ring-emerald-700/60'
+                      : 'hover:bg-zinc-800/50'
                   }`}
                 >
-                  <span
-                    className={`shrink-0 font-mono text-[11px] ${
-                      isSecondaryStack ? 'text-emerald-500/70' : 'text-emerald-400'
-                    }`}
-                  >
-                    {formatTimestamp(line.timeMs)}
-                  </span>
-                  <span
-                    className={`min-w-0 break-words leading-snug ${
-                      isSecondaryStack ? 'text-zinc-400/90' : ''
-                    }`}
-                  >
-                    {line.text || <span className="italic text-zinc-600">(instrumental)</span>}
-                  </span>
-                </button>
+                  <div className="flex shrink-0 items-start gap-1 pt-0.5">
+                    {isEditingTimestamp ? (
+                      <input
+                        type="text"
+                        autoFocus
+                        value={timestampDraft}
+                        onChange={(event) => setTimestampDraft(event.target.value)}
+                        onBlur={() => commitTimestampEdit(row)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault()
+                            commitTimestampEdit(row)
+                          } else if (event.key === 'Escape') {
+                            event.preventDefault()
+                            setEditingTimestampKey(null)
+                            setTimestampDraft('')
+                          }
+                        }}
+                        aria-label={`Edit timestamp for row at ${formatTimestamp(row.timeMs)}`}
+                        className={`w-[72px] rounded border px-0.5 py-0 font-mono text-[11px] text-zinc-100 focus:outline-none ${
+                          isValidInlineTimestamp(timestampDraft)
+                            ? 'border-emerald-500 bg-zinc-950'
+                            : 'border-red-600 bg-zinc-950'
+                        }`}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onSeekToMs(seekTrackId, row.timeMs)}
+                        onDoubleClick={() => {
+                          setTimestampDraft(formatTimestamp(row.timeMs))
+                          setEditingTimestampKey(row.key)
+                        }}
+                        title="Click to seek the audio preview; double-click to edit this timestamp"
+                        className="rounded px-0.5 font-mono text-[11px] text-emerald-400 hover:bg-zinc-800"
+                      >
+                        {formatTimestamp(row.timeMs)}
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <div className="flex min-w-0 items-center gap-1">
+                      {renderTextInput(
+                        row,
+                        'text',
+                        isActive ? 'font-medium text-emerald-100' : 'text-[12.5px]'
+                      )}
+                    </div>
+
+                    {showTranslationLayer && hasTranslation && (
+                      <div className="flex min-w-0 items-center gap-1 pl-3">
+                        <span
+                          aria-hidden
+                          className="w-1 shrink-0 self-stretch rounded bg-sky-800/60"
+                        />
+                        {renderTextInput(row, 'translation', 'text-[11px] text-sky-200/90')}
+                      </div>
+                    )}
+                    {showRomanizationLayer && hasRomanization && (
+                      <div className="flex min-w-0 items-center gap-1 pl-3">
+                        <span
+                          aria-hidden
+                          className="w-1 shrink-0 self-stretch rounded bg-violet-800/60"
+                        />
+                        {renderTextInput(row, 'romanization', 'text-[11px] text-violet-200/90')}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex shrink-0 items-start gap-0.5 pt-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                    <button
+                      type="button"
+                      onClick={() => insertRowAfter(row)}
+                      title="Insert a new line one second below"
+                      aria-label={`Insert a line after ${formatTimestamp(row.timeMs)}`}
+                      className="rounded p-0.5 text-zinc-500 hover:bg-zinc-700 hover:text-emerald-300"
+                    >
+                      <Plus className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeRow(row)}
+                      title="Remove this line (all layers)"
+                      aria-label={`Remove the line at ${formatTimestamp(row.timeMs)}`}
+                      className="rounded p-0.5 text-zinc-500 hover:bg-zinc-700 hover:text-red-300"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                </div>
               )
             })
           )}
@@ -538,18 +740,26 @@ export function LyricsEditorPanel({
 
   const rawEditor = (
     <textarea
-      aria-label="Lyrics LRC editor"
+      aria-label="Raw LRC editor"
       value={lyricsText}
       onChange={(event) => onLyricsChange(event.target.value)}
       placeholder="[00:00.00] Paste or fetch synced LRC lines..."
-      title="Raw LRC editor — edits the primary layer only"
+      title="Raw LRC editor — edits the primary layer as plain monospace text"
       className="h-full min-h-[120px] w-full resize-none rounded-md border border-zinc-700 bg-zinc-950 p-2.5 font-mono text-xs leading-relaxed text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500 focus:outline-none"
     />
   )
 
+  const embedLabel =
+    (showTranslationLayer && hasTranslation) || (showRomanizationLayer && hasRomanization)
+      ? 'Embed Stacked'
+      : 'Embed'
+
+  const autoSaveLabel =
+    autoSaveState === 'saving' ? 'Saving...' : autoSaveState === 'saved' ? 'Draft saved' : ''
+
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/70">
-      {/* Header: track identity + primary actions + Offset/Actions popovers */}
+      {/* Header: track identity, auto-save indicator, Revert + Embed */}
       <div className="shrink-0 space-y-1.5 border-b border-zinc-800 bg-zinc-900 px-3 py-2">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
@@ -561,44 +771,31 @@ export function LyricsEditorPanel({
                 .filter(Boolean)
                 .join(' — ')}
             </p>
-            <p className="truncate font-mono text-[10px] text-zinc-500">
-              {focusedTrack.format.toUpperCase()} · source: {focusedTrack.lyricsSource}
-              {hasDraft ? ' · draft saved' : ''}
-              {isDirty ? ' · unsaved edits' : ''}
+            <p className="flex min-w-0 items-center gap-1.5 truncate font-mono text-[10px] text-zinc-500">
+              <span className="truncate">
+                {focusedTrack.format.toUpperCase()} · source: {focusedTrack.lyricsSource}
+                {hasDraft ? ' · draft' : ''}
+              </span>
+              <span
+                role="status"
+                aria-live="polite"
+                className={`shrink-0 ${autoSaveState === 'saving' ? 'text-amber-400/90' : 'text-emerald-400/80'}`}
+              >
+                {autoSaveLabel}
+              </span>
             </p>
           </div>
 
           <div className="flex shrink-0 items-center gap-1">
-            {isFetching ? (
-              <button
-                type="button"
-                onClick={onCancelFetchFocused}
-                title="Cancel the in-flight lyrics fetch for this track (LRCLIB or sibling .lrc)"
-                className="inline-flex items-center gap-1 rounded border border-red-800 bg-red-950/70 px-2 py-1 text-xs font-medium text-red-200 hover:bg-red-900/70"
-              >
-                <XCircle className="h-3.5 w-3.5" />
-                Cancel
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={onFetchFocused}
-                title="Fetch lyrics for this track from LRCLIB or a sibling .lrc (sequential, paced requests)"
-                className="inline-flex items-center gap-1 rounded bg-sky-600 px-2 py-1 text-xs font-medium text-white hover:bg-sky-500"
-              >
-                <Download className="h-3.5 w-3.5" />
-                Fetch
-              </button>
-            )}
-
             <button
               type="button"
-              onClick={onSaveDraft}
-              disabled={!isDirty}
-              title="Persist the current lyrics as a per-track draft (atomic JSON write)"
-              className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
+              onClick={handleRevert}
+              disabled={!hasDraft}
+              title="Delete the draft, restore the lyrics embedded in the file, and clear the translation/romanization layers"
+              className="inline-flex items-center gap-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Save
+              <RotateCcw className="h-3.5 w-3.5" />
+              Revert
             </button>
             <button
               type="button"
@@ -607,13 +804,66 @@ export function LyricsEditorPanel({
               title="Atomically write lyrics to the file (stages a temp copy, verifies tags, unloads playback, closes media:// handles, restores mtime)"
               className="rounded bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {isEmbedding ? 'Embedding...' : 'Embed'}
+              {isEmbedding ? 'Embedding...' : embedLabel}
             </button>
           </div>
         </div>
 
-        {/* Compact tool strip: single Offset popover + Actions popover */}
+        {/* Mode bar: workspace modes + Raw Text toggle + Offset/Actions popovers */}
         <div className="flex flex-wrap items-center gap-1">
+          <div
+            className="inline-flex overflow-hidden rounded border border-zinc-700"
+            role="group"
+            aria-label="Workspace mode"
+          >
+            {(
+              [
+                { id: 'edit', label: 'Edit' },
+                { id: 'layers', label: 'Layers' },
+                { id: 'find', label: 'Find' }
+              ] as const
+            ).map((entry, index) => (
+              <button
+                key={entry.id}
+                type="button"
+                aria-pressed={mode === entry.id}
+                onClick={() => onModeChange(entry.id)}
+                title={
+                  entry.id === 'edit'
+                    ? 'Edit: live synced rows (Ctrl+1)'
+                    : entry.id === 'layers'
+                      ? 'Layers: translation + romanization columns (Ctrl+2)'
+                      : 'Find: candidate sifter (Ctrl+3)'
+                }
+                className={`${index > 0 ? 'border-l border-zinc-700 ' : ''}px-2 py-0.5 text-[11px] font-medium ${
+                  mode === entry.id
+                    ? 'bg-zinc-700 text-zinc-100'
+                    : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                }`}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            aria-pressed={editorLayout === 'raw'}
+            onClick={() => onEditorLayoutChange(editorLayout === 'raw' ? 'live' : 'raw')}
+            title={
+              editorLayout === 'raw'
+                ? 'Raw Text is on — switch back to the live editable rows'
+                : 'Switch to a single monospace Raw Text editor'
+            }
+            className={`rounded border px-1.5 py-0.5 text-[11px] font-medium ${
+              editorLayout === 'raw'
+                ? 'border-emerald-700 bg-emerald-950/60 text-emerald-200'
+                : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+            }`}
+          >
+            Raw Text
+          </button>
+
           <Popover
             label="Offset"
             title="Shift every timestamp in the primary LRC (positive = later)"
@@ -774,20 +1024,16 @@ export function LyricsEditorPanel({
                 <div className="my-1 border-t border-zinc-800" />
                 <button
                   type="button"
-                  disabled={!hasDraft && !isDirty}
+                  disabled={!hasDraft}
                   onClick={() => {
-                    onDiscardDraft()
+                    handleRevert()
                     close()
                   }}
-                  title={
-                    hasDraft
-                      ? 'Delete the saved draft and restore the lyrics embedded in the file'
-                      : 'Revert the unsaved edits back to the embedded lyrics'
-                  }
+                  title="Delete the draft and restore the lyrics embedded in the file"
                   className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Trash2 className="h-3 w-3" />
-                  Discard Draft
+                  Revert to Embedded File
                 </button>
               </div>
             )}
@@ -803,17 +1049,40 @@ export function LyricsEditorPanel({
       {/* Workspace body */}
       {mode === 'edit' && (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5">
-          {editorLayout === 'raw' && <div className="flex min-h-0 flex-1">{rawEditor}</div>}
-          {editorLayout === 'split' && (
-            <div className="flex min-h-0 flex-1 gap-2">
-              <div className="flex min-h-0 w-1/2 min-w-0">{rawEditor}</div>
-              <div className="flex min-h-0 w-1/2 min-w-0">
-                {renderSyncedPreview('h-full w-full')}
-              </div>
+          {editorLayout === 'raw' ? (
+            <div className="flex min-h-0 flex-1">{rawEditor}</div>
+          ) : hasTimedLines ? (
+            <div className="flex min-h-0 flex-1">{renderLiveRows()}</div>
+          ) : (
+            // Plain or empty lyrics: a clean editable textarea plus a hint.
+            <div className="flex min-h-0 flex-1 flex-col gap-1.5">
+              <p className="shrink-0 text-[11px] text-zinc-500">
+                No synced `[mm:ss.xx]` timestamps yet — open{' '}
+                <button
+                  type="button"
+                  onClick={() => onModeChange('find')}
+                  className="text-emerald-400 hover:underline"
+                >
+                  Find
+                </button>{' '}
+                to load synced lyrics, or switch to{' '}
+                <button
+                  type="button"
+                  onClick={() => onEditorLayoutChange('raw')}
+                  className="text-emerald-400 hover:underline"
+                >
+                  Raw Text
+                </button>{' '}
+                to paste plain text.
+              </p>
+              <textarea
+                aria-label="Plain lyrics editor"
+                value={lyricsText}
+                onChange={(event) => onLyricsChange(event.target.value)}
+                placeholder="Plain lyrics without timestamps…"
+                className="min-h-0 flex-1 resize-none rounded-md border border-zinc-700 bg-zinc-950 p-2.5 text-xs leading-relaxed text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500 focus:outline-none"
+              />
             </div>
-          )}
-          {editorLayout === 'preview' && (
-            <div className="flex min-h-0 flex-1">{renderSyncedPreview('h-full w-full')}</div>
           )}
         </div>
       )}
@@ -828,8 +1097,6 @@ export function LyricsEditorPanel({
                   label: 'Primary',
                   value: lyricsText,
                   onChange: onLyricsChange,
-                  // Swapping the primary column swaps it with the layer that has
-                  // content (translation first, then romanization).
                   onSwap: hasTranslation
                     ? handleSwapTranslation
                     : hasRomanization
@@ -901,40 +1168,11 @@ export function LyricsEditorPanel({
             ))}
           </div>
 
-          <div className="flex flex-wrap shrink-0 items-center justify-between gap-1.5">
-            <div
-              className="inline-flex overflow-hidden rounded border border-zinc-700"
-              role="group"
-              aria-label="Preview mode"
-            >
-              <button
-                type="button"
-                aria-pressed={previewMode === 'primary'}
-                onClick={() => setPreviewMode('primary')}
-                title="Preview only the primary LRC in the clickable list and the audio player"
-                className={`px-1.5 py-1 text-[10px] font-medium ${
-                  previewMode === 'primary'
-                    ? 'bg-zinc-700 text-zinc-100'
-                    : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
-                }`}
-              >
-                Preview: Primary
-              </button>
-              <button
-                type="button"
-                aria-pressed={previewMode === 'stacked'}
-                onClick={() => setPreviewMode('stacked')}
-                title="Preview primary + translation + romanization stacked; also feeds the audio player's active lines"
-                className={`border-l border-zinc-700 px-1.5 py-1 text-[10px] font-medium ${
-                  previewMode === 'stacked'
-                    ? 'bg-zinc-700 text-zinc-100'
-                    : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
-                }`}
-              >
-                Stacked
-              </button>
-            </div>
-
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-1.5">
+            <span className="text-[11px] text-zinc-500">
+              Layers interleave at matching `[mm:ss.xx]` timestamps; the primary is never
+              overwritten until you apply.
+            </span>
             <button
               type="button"
               disabled={!stackedOutput}
@@ -1072,7 +1310,7 @@ export function LyricsEditorPanel({
                   type="button"
                   disabled={!selectedCandidateLyrics}
                   onClick={() => selectedCandidate && onLoadCandidate(selectedCandidate)}
-                  title="Replace the primary LRC with this candidate's synced (or plain) lyrics and save it as a draft"
+                  title="Replace the primary LRC with this candidate's synced (or plain) lyrics and save the draft"
                   className="rounded border border-emerald-700/80 bg-emerald-950/60 px-2 py-1 text-[11px] font-medium text-emerald-200 hover:bg-emerald-900/60 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Load Primary
@@ -1127,7 +1365,7 @@ export function LyricsEditorPanel({
             <button
               type="button"
               aria-pressed={showTranslationLayer}
-              onClick={() => setShowTranslationLayer((prev) => !prev)}
+              onClick={handleToggleTranslationLayer}
               title="Toggle whether the translation layer appears in the live stacked preview (never overwrites the primary)"
               className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${
                 showTranslationLayer
@@ -1142,7 +1380,7 @@ export function LyricsEditorPanel({
             <button
               type="button"
               aria-pressed={showRomanizationLayer}
-              onClick={() => setShowRomanizationLayer((prev) => !prev)}
+              onClick={handleToggleRomanizationLayer}
               title="Toggle whether the romanization layer appears in the live stacked preview (never overwrites the primary)"
               className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${
                 showRomanizationLayer

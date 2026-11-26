@@ -13,6 +13,11 @@ export interface AudioPreviewPlayerProps {
   playerCommand: PlayerCommand | null
   /** TagLib / WASI worker health, rendered as a quiet status dot. */
   health?: TagEngineHealth | null
+  /**
+   * Transient info/success message shown in a reserved slot beside the TagLib
+   * dot. Lives here so it never overlaps the editor (no floating overlays).
+   */
+  statusMessage?: string | null
   onPlaybackChange: (loadedTrackId: string | null, timeMs: number, isPlaying: boolean) => void
   onPlayerError: (message: string) => void
 }
@@ -27,6 +32,7 @@ export function AudioPreviewPlayer({
   seekRequest,
   playerCommand,
   health = null,
+  statusMessage = null,
   onPlaybackChange,
   onPlayerError
 }: AudioPreviewPlayerProps) {
@@ -383,25 +389,39 @@ export function AudioPreviewPlayer({
         </div>
 
         {/*
-          Quiet TagLib / WASI engine indicator: green when the utility-process
-          tag engine is ready, amber (with the error in the tooltip) otherwise.
+          Reserved status slot (non-overlapping, in the dock's flex flow) followed
+          by the quiet TagLib / WASI engine indicator: green when the
+          utility-process tag engine is ready, amber with the error in the
+          tooltip otherwise.
         */}
-        <span
-          title={
-            health?.ready
-              ? `TagLib ${health.taglibVersion ?? 'ready'} (PID ${health.workerPid ?? '?'})`
-              : (health?.error ?? 'Tag engine initializing')
-          }
-          className="flex shrink-0 items-center gap-1 text-[10px] text-zinc-500"
-        >
+        <div className="flex shrink-0 items-center gap-2">
           <span
-            aria-hidden
-            className={`h-1.5 w-1.5 rounded-full ${
-              health?.ready ? 'bg-emerald-400' : 'bg-amber-400'
+            role="status"
+            aria-live="polite"
+            title={statusMessage ?? undefined}
+            className={`max-w-[220px] truncate text-[10px] ${
+              statusMessage ? 'text-emerald-300' : 'text-transparent'
             }`}
-          />
-          TagLib
-        </span>
+          >
+            {statusMessage ?? ' '}
+          </span>
+          <span
+            title={
+              health?.ready
+                ? `TagLib ${health.taglibVersion ?? 'ready'} (PID ${health.workerPid ?? '?'})`
+                : (health?.error ?? 'Tag engine initializing')
+            }
+            className="flex shrink-0 items-center gap-1 text-[10px] text-zinc-500"
+          >
+            <span
+              aria-hidden
+              className={`h-1.5 w-1.5 rounded-full ${
+                health?.ready ? 'bg-emerald-400' : 'bg-amber-400'
+              }`}
+            />
+            TagLib
+          </span>
+        </div>
       </div>
     </footer>
   )

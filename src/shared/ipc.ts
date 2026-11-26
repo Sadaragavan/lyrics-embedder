@@ -95,6 +95,10 @@ export interface ScanLibraryResult {
 export interface SaveDraftRequest {
   trackId: string
   lyrics: string
+  /** Optional translation layer saved with the draft. */
+  translation?: string
+  /** Optional romanization layer saved with the draft. */
+  romanization?: string
   status?: DraftStatus
 }
 

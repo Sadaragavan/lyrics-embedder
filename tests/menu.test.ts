@@ -27,7 +27,7 @@ describe('MenuSyncState sanitization', () => {
     } as unknown as MenuSyncState)
     expect(state.selectedCount).toBe(0)
     expect(state.mode).toBe('edit')
-    expect(state.editorLayout).toBe('split')
+    expect(state.editorLayout).toBe('live')
     expect(state.hasFocusedTrack).toBe(false)
   })
 
@@ -48,7 +48,7 @@ describe('MenuSyncState sanitization', () => {
       preserveWordTags: true,
       sidebarVisible: false,
       mode: 'layers',
-      editorLayout: 'preview',
+      editorLayout: 'raw',
       isPlaying: true,
       canPlay: true,
       canStop: true,
@@ -78,7 +78,6 @@ describe('menuStateEquals', () => {
       { mode: 'layers' },
       { mode: 'find' },
       { editorLayout: 'raw' },
-      { editorLayout: 'preview' },
       { isPlaying: true },
       { canPlay: true },
       { canStop: true },
@@ -118,7 +117,7 @@ describe('Menu template structure', () => {
     preserveWordTags: false,
     sidebarVisible: true,
     mode: 'edit',
-    editorLayout: 'split',
+    editorLayout: 'live',
     isPlaying: false,
     canPlay: true,
     canStop: false,
@@ -132,15 +131,32 @@ describe('Menu template structure', () => {
     expect(labels).toEqual(['File', 'Edit', 'View', 'Playback', 'Help'])
   })
 
-  it('File contains exact accelerator set', () => {
+  it('File contains the exact accelerator set (no manual Save Draft)', () => {
     const template = buildMenuTemplate(state)
     const file = template.find((item) => item.label === 'File')!
     const accelerators = collectAccelerators(file.submenu ?? [])
     expect(accelerators).toContain('Ctrl+O')
     expect(accelerators).toContain('Ctrl+Shift+R')
     expect(accelerators).toContain('Ctrl+I')
-    expect(accelerators).toContain('Ctrl+S')
     expect(accelerators).toContain('Ctrl+E')
+    // Drafts auto-save, so Ctrl+S / a Save Draft item no longer exists.
+    expect(accelerators).not.toContain('Ctrl+S')
+    expect(
+      file.submenu!.some((item) => (item.action as string | undefined) === 'save-draft')
+    ).toBe(false)
+  })
+
+  it('File offers Revert to Embedded File, enabled only with a focused track and a draft', () => {
+    const withDraft = buildMenuTemplate({ ...state, hasDraft: true })
+    const file = withDraft.find((item) => item.label === 'File')!
+    const revert = file.submenu!.find((item) => item.action === 'discard-draft')
+    expect(revert?.label).toBe('Revert to Embedded File')
+    expect(revert?.enabled).toBe(true)
+
+    const withoutDraft = buildMenuTemplate({ ...state, hasDraft: false })
+    const file2 = withoutDraft.find((item) => item.label === 'File')!
+    const revert2 = file2.submenu!.find((item) => item.action === 'discard-draft')
+    expect(revert2?.enabled).toBe(false)
   })
 
   it('Edit has normalize Ctrl+Shift+N and preserve checkbox', () => {
@@ -176,7 +192,7 @@ describe('Menu template structure', () => {
 
     const layoutSub = view.submenu!.find((item) => item.label === 'Editor Layout')!
     const layoutItems = layoutSub.submenu!.map((item) => item.action)
-    expect(layoutItems).toEqual(['layout-raw', 'layout-split', 'layout-preview'])
+    expect(layoutItems).toEqual(['layout-live', 'layout-raw'])
 
     const devTools = view.submenu!.find((item) => item.role === 'toggleDevTools')
     expect(devTools).toBeDefined()
