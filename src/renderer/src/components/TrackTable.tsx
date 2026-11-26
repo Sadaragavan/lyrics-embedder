@@ -6,7 +6,8 @@ import { formatDuration, hasSyncedTimestamps } from '@shared/lyricsSync'
 import type { SelectionClickModifiers, TrackSelectionState } from '@shared/trackSelection'
 import type { TrackEmbedStatus } from '../types'
 
-const ROW_HEIGHT = 44
+/** Compact row height tuned for 360-440px library panes on 1366x768. */
+const ROW_HEIGHT = 34
 
 export interface TrackTableProps {
   tracks: TrackRecord[]
@@ -142,7 +143,7 @@ function renderStatusPill(
     }
   }
 
-  return <span className="text-[11px] text-zinc-600">—</span>
+  return <span className="text-[10px] text-zinc-600">—</span>
 }
 
 export function TrackTable({
@@ -167,24 +168,23 @@ export function TrackTable({
   })
 
   const virtualRows = virtualizer.getVirtualItems()
+  const hasSelection = selection.selectedIds.size > 0
 
   return (
-    <section className="flex h-full min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/70 overflow-hidden">
-      <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs">
+    <section className="flex min-h-0 flex-1 flex-col rounded-lg border border-zinc-800 bg-zinc-900/70 overflow-hidden">
+      <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-900 px-2.5 py-1 text-[10px]">
         <div className="flex items-center gap-2">
-          <span className="font-medium text-zinc-200">Library Tracks</span>
+          <span className="font-medium text-zinc-200">Tracks</span>
           <span className="text-zinc-500 tabular-nums">
-            {selection.selectedIds.size > 0
-              ? `${selection.selectedIds.size} selected`
-              : `${tracks.length} shown`}
+            {hasSelection ? `${selection.selectedIds.size} selected` : `${tracks.length} shown`}
           </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <button
             type="button"
             onClick={onSelectAll}
             disabled={tracks.length === 0}
-            className="text-[11px] text-zinc-400 hover:text-zinc-100 disabled:opacity-40"
+            className="text-[10px] text-zinc-400 hover:text-zinc-100 disabled:opacity-40 shrink-0"
           >
             Select All
           </button>
@@ -192,14 +192,14 @@ export function TrackTable({
             type="button"
             onClick={onClearSelection}
             disabled={selection.selectedIds.size === 0}
-            className="text-[11px] text-zinc-400 hover:text-zinc-100 disabled:opacity-40"
+            className="text-[10px] text-zinc-400 hover:text-zinc-100 disabled:opacity-40 shrink-0"
           >
             Clear
           </button>
         </div>
       </div>
 
-      <div className="grid shrink-0 grid-cols-[28px_minmax(0,1fr)_64px_54px_124px_88px] items-center gap-2 border-b border-zinc-800/80 bg-zinc-950/60 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+      <div className="grid shrink-0 grid-cols-[28px_minmax(0,1fr)_56px_50px_110px_72px] items-center gap-1.5 border-b border-zinc-800/80 bg-zinc-950/60 px-2.5 py-1 text-[9px] font-medium uppercase tracking-wider text-zinc-500">
         <span />
         <span>Track / Artist</span>
         <span>Format</span>
@@ -209,8 +209,8 @@ export function TrackTable({
       </div>
 
       {tracks.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center p-6 text-center text-xs text-zinc-500">
-          Add a library folder and scan to populate tracks, or adjust your search/filter.
+        <div className="flex flex-1 items-center justify-center p-4 text-center text-xs text-zinc-500">
+          Scan a library folder to populate tracks.
         </div>
       ) : (
         <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto select-none">
@@ -252,7 +252,7 @@ export function TrackTable({
                     height: `${ROW_HEIGHT}px`,
                     transform: `translateY(${virtualRow.start}px)`
                   }}
-                  className={`grid cursor-pointer grid-cols-[28px_minmax(0,1fr)_64px_54px_124px_88px] items-center gap-2 border-b border-zinc-800/50 px-3 text-xs transition-colors ${
+                  className={`grid cursor-pointer grid-cols-[28px_minmax(0,1fr)_56px_50px_110px_72px] items-center gap-1.5 border-b border-zinc-800/50 px-2.5 text-[10px] transition-colors ${
                     isFocused
                       ? 'bg-emerald-950/45 ring-1 ring-inset ring-emerald-700/70'
                       : isSelected
@@ -267,48 +267,54 @@ export function TrackTable({
                       event.stopPropagation()
                       onRowClick(track.id, { ctrlKey: true })
                     }}
-                    className={`flex h-4 w-4 items-center justify-center rounded border ${
+                    className={`flex h-3.5 w-3.5 items-center justify-center rounded border ${
                       isSelected
                         ? 'border-emerald-500 bg-emerald-600 text-white'
                         : 'border-zinc-600 bg-zinc-950 text-transparent hover:border-zinc-400'
                     }`}
                   >
-                    <Check className="h-3 w-3" />
+                    <Check className="h-2.5 w-2.5" />
                   </button>
 
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5 min-w-0">
                       {isLoadedAudio && (
                         <Volume2
-                          className={`h-3.5 w-3.5 shrink-0 ${
+                          className={`h-3 w-3 shrink-0 ${
                             isPlaying ? 'text-emerald-400' : 'text-zinc-400'
                           }`}
                         />
                       )}
-                      <span className="truncate font-medium text-zinc-100">{track.title}</span>
-                    </div>
-                    <div className="truncate text-[11px] text-zinc-400">
-                      {[track.artist || 'Unknown Artist', track.album].filter(Boolean).join(' · ')}
+                      <div className="min-w-0">
+                        <div className="truncate font-medium text-zinc-100 leading-none">
+                          {track.title}
+                        </div>
+                        <div className="truncate text-[9px] text-zinc-400 leading-none">
+                          {[track.artist || 'Unknown Artist', track.album]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </div>
+                      </div>
                     </div>
                   </div>
 
-                  <span className="font-mono text-[11px] text-zinc-300 truncate">
+                  <span className="font-mono text-[9px] text-zinc-300 truncate leading-none">
                     {track.format}
                   </span>
 
-                  <span className="text-right font-mono text-[11px] tabular-nums text-zinc-400">
+                  <span className="text-right font-mono text-[9px] tabular-nums text-zinc-400 leading-none">
                     {formatDuration(track.durationSec)}
                   </span>
 
-                  <div className="flex items-center gap-1 overflow-hidden">
+                  <div className="flex items-center gap-1 overflow-hidden min-w-0">
                     {track.lyricsSource === 'none' ? (
-                      <span className="rounded bg-zinc-800/80 px-1.5 py-0.5 text-[10px] text-zinc-500">
+                      <span className="rounded bg-zinc-800/80 px-1 py-0.5 text-[9px] text-zinc-500 leading-none">
                         None
                       </span>
                     ) : (
                       <>
                         <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                          className={`rounded px-1 py-0.5 text-[9px] font-medium leading-none ${
                             track.lyricsSource === 'sidecar'
                               ? 'bg-violet-950/70 text-violet-300 border border-violet-800/70'
                               : 'bg-zinc-800 text-zinc-200 border border-zinc-700'
@@ -317,18 +323,18 @@ export function TrackTable({
                           {track.lyricsSource === 'sidecar' ? 'LRC' : 'Tag'}
                         </span>
                         <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] ${
+                          className={`rounded px-1 py-0.5 text-[9px] ${
                             synced
                               ? 'bg-emerald-950/70 text-emerald-300'
                               : 'bg-amber-950/70 text-amber-300'
-                          }`}
+                          } leading-none`}
                         >
                           {synced ? 'Sync' : 'Plain'}
                         </span>
                       </>
                     )}
                     {hasDraft && (
-                      <span className="rounded bg-amber-900/70 border border-amber-700/80 px-1.5 py-0.5 text-[10px] font-medium text-amber-200">
+                      <span className="rounded bg-amber-900/70 border border-amber-700/80 px-1 py-0.5 text-[9px] font-medium text-amber-200 leading-none">
                         Draft
                       </span>
                     )}

@@ -9,6 +9,8 @@ import {
   type LyricsSearchRequest,
   type MediaUnloadAck,
   type MediaUnloadRequest,
+  type MenuAction,
+  type MenuSyncState,
   type SaveDraftRequest,
   type ScanLibraryRequest
 } from '@shared/ipc'
@@ -75,7 +77,11 @@ const api: ElectronApi = {
     }
   },
   onLyricsFetchProgress: (listener) =>
-    subscribe<LyricsFetchProgress>(IPC_CHANNELS.lyricsFetchProgress, listener)
+    subscribe<LyricsFetchProgress>(IPC_CHANNELS.lyricsFetchProgress, listener),
+  onMenuAction: (listener) => subscribe<MenuAction>(IPC_CHANNELS.menuAction, listener),
+  syncMenuState: (state: MenuSyncState) => {
+    ipcRenderer.send(IPC_CHANNELS.menuSyncState, state)
+  }
 }
 
 contextBridge.exposeInMainWorld('api', api)

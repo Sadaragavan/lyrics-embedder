@@ -9,13 +9,21 @@ import type {
   LyricsSearchResult,
   MediaUnloadRequest,
   MediaUrl,
+  MenuAction,
+  MenuSyncState,
   ScanProgress,
   TrackRecord
 } from './types'
 
 export {
+  MENU_ACTIONS,
   SUPPORTED_AUDIO_EXTENSIONS,
+  isMenuAction,
   type DraftStatus,
+  type EditorLayout,
+  type MenuAction,
+  type MenuSyncState,
+  type WorkspaceMode,
   type LibraryIndex,
   type LibraryRoot,
   type LyricDraft,
@@ -129,7 +137,9 @@ export const IPC_CHANNELS = {
   lyricsCancelFetch: 'lyrics:cancelFetch',
   lyricsFetchProgress: 'lyrics:fetchProgress',
   lyricsImportFile: 'lyrics:importFile',
-  lyricsSearchCandidates: 'lyrics:searchCandidates'
+  lyricsSearchCandidates: 'lyrics:searchCandidates',
+  menuAction: 'menu:action',
+  menuSyncState: 'menu:syncState'
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]
@@ -160,6 +170,8 @@ export interface ElectronApi {
   onScanComplete: (listener: (result: ScanLibraryResult) => void) => () => void
   onUnloadAudio: (listener: (request: MediaUnloadRequest) => void) => () => void
   onLyricsFetchProgress: (listener: (progress: LyricsFetchProgress) => void) => () => void
+  onMenuAction: (listener: (action: MenuAction) => void) => () => void
+  syncMenuState: (state: MenuSyncState) => void
 }
 
 export type WorkerPayload =

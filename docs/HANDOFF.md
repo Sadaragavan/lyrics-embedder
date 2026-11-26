@@ -1,41 +1,35 @@
 # Active Handoff
 
-- Updated: 2026-11-26 10:46 IST
+- Updated: 2026-11-26 12:20 IST
 - Last agent: builder
 - Branch: main
-- Base commit: 05225d0
+- Base commit: 2c98fe6
 
 ## Current Goal
-Run the Phase 4 hardware verification walkthrough: interactive Electron desktop pass, then Poweramp Android spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav` + `.lrc` outputs.
+Phase 5 (Native Application Menu + Dynamic Workspace Overhaul) complete — all four priorities implemented and verified. Remaining: interactive desktop walkthrough and Poweramp Android hardware spot-check (Phase 4 verification milestone, unchanged).
 
 ## Completed Since Last Handoff
-Phase 4.5 delivered four items:
-1. **Candidate Sifter**: `lyrics:searchCandidates` IPC + `LrclibProvider.searchAllCandidates` (`/api/get` then paced `/api/search`, dedup by source id), `LyricsSearchRequest`/`LyricsSearchResult` types, focus-prefilled search fields with stale-response guards, collapsible results with Load Primary / To Translation / To Romanization.
-2. **Multi-line sync**: `findActiveLineIndices` in `src/shared/lyricsSync.ts` returns all stacked lines sharing the active timestamp; `AudioPreviewPlayer` highlights every stacked line (backwards-compatible with `findActiveLineIndex`).
-3. **Transfer controls**: send/swap translation and romanization between layers in `LyricsEditorPanel`, Primary Only / Stacked Preview toggle whose live output feeds both the clickable preview and the player.
-4. **Tooltips**: `title`/accessible labels across editor, toolbar, and table controls.
-
-Tests: `tests/lrclib.test.ts` (+140 lines, candidate dedup/pacing) and `tests/lyricsSync.test.ts` (+33 lines, stacked timestamps).
+1. **Native application menu** (Priority 1): `src/shared/menu.ts` pure template/sanitizer (`buildMenuTemplate`, `sanitizeMenuSyncState`, `findBareSpaceAccelerators`); `src/main/menu.ts` Electron adapter (`setupApplicationMenu`, `updateMenuState`, `disposeApplicationMenu`, Helpers > Engine Status dialog). File/Edit/View/Playback/Help menus with explicit Ctrl/Alt accelerators — no bare `Space`. IPC: `menu:action` (renderer listener) + `menu:syncState` (renderer sender), typed `MenuAction`/`MenuSyncState`/`WorkspaceMode`/`EditorLayout`. Wired into `index.ts`, `preload/index.ts`.
+2. **Dynamic layout** (Priority 2): Collapsible library sidebar with draggable split divider (280-900px clamp), compact mode bar (Edit/Layers/Find + editor layout radios Raw/Split/Preview) in the workspace column. `mode` drives the editor tab and sifter visibility. 1366x768-friendly flex layout.
+3. **Renderer components** (Priority 3): Compact `TrackTable` rows (34px, dense pills), `LyricsEditorPanel` three modes (raw/stack tabs, primary/stacked preview, lifted translation/romanization layers), `AudioPreviewPlayer` bottom dock with one-shot `PlayerCommand` for menu toggle/stop. Preserved all tagging/store/scanner/provider/`media://`/`onUnloadAudio` behavior. `app.css` unchanged.
+4. **Menu tests** (Priority 4): `tests/menu.test.ts` covers state sanitization, MenuAction validation, template structure, accelerator sets (Alt+P/Alt+S, no bare Space), radio/checkbox states, and invalid-action rejection.
 
 ## Verification Status
 - `npm run typecheck`: PASS (0 errors)
-- `npm test`: PASS (163/163 tests across 11 files)
+- `npm test`: PASS (176/176 tests across 12 files)
 - `npm run build`: PASS
 - `npm run build:unpack`: PASS
 - Packaged `--smoke-test`: PASS (`ready: true`, `2.5.1 (TagLib 2.3.2)`, no error)
 
 ## Exact Next Step
-1. `npm run dev` (or `release/win-unpacked/Poweramp LRC Embedder.exe`) on Windows: verify folder scan, Shift/Ctrl table selection, `media://` playback/seek, live `onUnloadAudio` lock release while embedding the playing track, candidate sifter search/load, translation transfer/swap, stacked preview, and draft badge sync.
-2. Copy embedded `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav` + `.lrc` samples to Poweramp on Android; spot-check synced rendering, `[offset:±ms]` polarity, stacked translation display, and UTF-8/UTF-16 tag compatibility. Then tick the Phase 4 verification milestone in `docs/PROGRESS.md`.
+1. `npm run dev` (or packaged exe) on Windows: verify native menu accelerators (Ctrl+O/I/S/E, Ctrl+B, Ctrl+1/2/3, Alt+P/S, Help > Engine Status), collapsible sidebar drag, mode bar switching Edit/Layers/Find, layer transfer actions, and that menu checkboxes/radios stay in sync with UI state.
+2. Interactive desktop walkthrough and Poweramp Android hardware spot-check as described in Phase 4 milestone.
 
 ## Files in Scope
-- `src/main/{index.ts,providers/lrclib.ts}`
-- `src/preload/index.ts`
-- `src/renderer/src/{App.tsx,components/{AudioPreviewPlayer,LibraryToolbar,LyricsEditorPanel,TrackTable}.tsx}`
-- `src/shared/{ipc.ts,types.ts,lyricsSync.ts}`
-- `tests/{lrclib,lyricsSync}.test.ts`, `docs/{PROGRESS.md,HANDOFF.md}`
+- `src/main/{index.ts,menu.ts}`; `src/preload/index.ts`; `src/shared/{ipc.ts,types.ts,menu.ts}`
+- `src/renderer/src/{App.tsx,types.ts,components/{TrackTable,LyricsEditorPanel,AudioPreviewPlayer,LibraryToolbar}.tsx}`
+- `tests/menu.test.ts`, `docs/{PROGRESS.md,HANDOFF.md}`
 
 ## Constraints / Open Blockers
-- Physical Android device with Poweramp is required for the hardware spot-check; it cannot run in automated Windows CLI checks.
-- Local music samples in `tests/fixtures/*.m4a` and `*.opus` are excluded via `.git/info/exclude` (uncommitted by design) for the hardware pass.
-- Sandbox note: `.git`/`node_modules` owned by `BUILTIN/Administrators` can cause `EPERM` on `.git/index.lock` and Vite `.mjs` temp files inside the sandbox; run Git, Vitest, build, and packaging outside the sandbox.
+- Physical Android device with Poweramp required for hardware spot-check; cannot run in automated Windows CLI checks.
+- Sandbox note: `.git`/`node_modules` owned by `BUILTIN/Administrators` can cause `EPERM` on `.git/index.lock`; run Git/Vitest/build/packaging outside the sandbox if needed.

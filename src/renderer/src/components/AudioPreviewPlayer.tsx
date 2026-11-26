@@ -2,13 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pause, Play, Square, Volume2 } from 'lucide-react'
 import type { TrackRecord } from '@shared/ipc'
 import { formatDuration } from '@shared/lyricsSync'
-import type { SeekRequest } from '../types'
+import type { PlayerCommand, SeekRequest } from '../types'
 
 export interface AudioPreviewPlayerProps {
   focusedTrack: TrackRecord | null
   /** Every active line sharing the current timestamp, stacked top-to-bottom. */
   activeLineTexts: string[]
   seekRequest: SeekRequest | null
+  /** One-shot command from the native Playback menu. */
+  playerCommand: PlayerCommand | null
   onPlaybackChange: (loadedTrackId: string | null, timeMs: number, isPlaying: boolean) => void
   onPlayerError: (message: string) => void
 }
@@ -21,6 +23,7 @@ export function AudioPreviewPlayer({
   focusedTrack,
   activeLineTexts,
   seekRequest,
+  playerCommand,
   onPlaybackChange,
   onPlayerError
 }: AudioPreviewPlayerProps) {
@@ -40,6 +43,10 @@ export function AudioPreviewPlayer({
 
   const onPlayerErrorRef = useRef(onPlayerError)
   onPlayerErrorRef.current = onPlayerError
+
+  const togglePlayRef = useRef<() => void>(() => undefined)
+  const stopUnloadRef = useRef<() => void>(() => undefined)
+  const handledCommandNonceRef = useRef<number | null>(null)
 
   const stopAndUnload = useCallback(() => {
     loadNonceRef.current += 1
@@ -210,6 +217,25 @@ export function AudioPreviewPlayer({
     }
   }
 
+  togglePlayRef.current = () => {
+    void handleTogglePlay()
+  }
+  stopUnloadRef.current = () => {
+    stopAndUnload()
+  }
+
+  // Native menu playback commands are delivered as one-shot nonce-keyed values.
+  useEffect(() => {
+    if (!playerCommand) return
+    if (handledCommandNonceRef.current === playerCommand.nonce) return
+    handledCommandNonceRef.current = playerCommand.nonce
+    if (playerCommand.kind === 'toggle') {
+      togglePlayRef.current()
+    } else {
+      stopUnloadRef.current()
+    }
+  }, [playerCommand])
+
   function handleScrub(nextSeconds: number) {
     const audioEl = audioRef.current
     const loaded = loadedMediaRef.current
@@ -223,7 +249,7 @@ export function AudioPreviewPlayer({
     durationSec > 0 ? durationSec : (focusedTrack?.durationSec ?? 0)
 
   return (
-    <footer className="shrink-0 border-t border-zinc-800 bg-zinc-900/95 px-4 py-2">
+    <footer className="shrink-0 h-[70px] border-t border-zinc-800 bg-zinc-900/95 px-4 flex items-center gap-3">
       <audio
         ref={audioRef}
         preload="metadata"
@@ -317,7 +343,7 @@ export function AudioPreviewPlayer({
                   : 'Select a track to preview')}
             </span>
           </div>
-          <div className="min-h-[16px] max-h-16 space-y-0.5 overflow-y-auto text-[11px] text-emerald-300/90">
+          <div className="min-h-[18px] max-h-[48px] space-y-0.5 overflow-y-auto text-[11px] text-emerald-300/90">
             {activeLineTexts.length > 0 ? (
               activeLineTexts.map((text, index) => (
                 <div key={`${index}-${text}`} className="truncate" title={text}>

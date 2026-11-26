@@ -14,7 +14,12 @@ import {
   Trash2,
   XCircle
 } from 'lucide-react'
-import type { LyricsFetchProgress, LyricsSearchResult, TrackRecord } from '@shared/ipc'
+import type {
+  LyricsFetchProgress,
+  LyricsSearchResult,
+  TrackRecord,
+  WorkspaceMode
+} from '@shared/ipc'
 import {
   formatTimestamp,
   normalizeLrc,
@@ -48,6 +53,14 @@ export interface LyricsEditorPanelProps {
   onEmbedFocused: () => void
   /** Emits the live preview text (primary, or stacked when layers are present). */
   onPreviewTextChange: (trackId: string, text: string) => void
+  /** Workspace mode from the mode bar / native View menu. */
+  mode: WorkspaceMode
+  /** Primary text copied into the translation layer (controlled by App/menu). */
+  secondaryLayerText: string
+  onSecondaryLayerChange: (text: string) => void
+  /** Primary text copied into the romanization layer (controlled by App/menu). */
+  romanizationLayerText: string
+  onRomanizationLayerChange: (text: string) => void
   // --- Candidate sifter ---
   sifterOpen: boolean
   onSifterOpenChange: (open: boolean) => void
@@ -213,6 +226,11 @@ export function LyricsEditorPanel({
   onDiscardDraft,
   onEmbedFocused,
   onPreviewTextChange,
+  mode,
+  secondaryLayerText,
+  onSecondaryLayerChange,
+  romanizationLayerText,
+  onRomanizationLayerChange,
   sifterOpen,
   onSifterOpenChange,
   searchTitle,
@@ -231,18 +249,21 @@ export function LyricsEditorPanel({
   onLoadCandidate
 }: LyricsEditorPanelProps) {
   const [activeTab, setActiveTab] = useState<EditorTab>('raw')
-  const [secondaryLayerText, setSecondaryLayerText] = useState('')
-  const [romanizationLayerText, setRomanizationLayerText] = useState('')
   const [previewMode, setPreviewMode] = useState<PreviewMode>('stacked')
   const activeLineRef = useRef<HTMLButtonElement | null>(null)
 
   const focusedTrackId = focusedTrack?.id ?? null
 
   useEffect(() => {
-    setSecondaryLayerText('')
-    setRomanizationLayerText('')
     setPreviewMode('stacked')
   }, [focusedTrackId])
+
+  // Workspace mode drives the visible editor tab and the candidate sifter.
+  useEffect(() => {
+    if (mode === 'layers') setActiveTab('stack')
+    else if (mode === 'edit') setActiveTab('raw')
+    if (mode === 'find') onSifterOpenChange(true)
+  }, [mode, onSifterOpenChange])
 
   const primaryLines = useMemo(
     () => parseLrc(lyricsText, { preserveWordTags }),
@@ -314,32 +335,32 @@ export function LyricsEditorPanel({
   }
 
   function handleSendToTranslation() {
-    setSecondaryLayerText(lyricsText)
+    onSecondaryLayerChange(lyricsText)
   }
 
   function handleSendToRomanization() {
-    setRomanizationLayerText(lyricsText)
+    onRomanizationLayerChange(lyricsText)
   }
 
   function handleSwapTranslation() {
     const nextPrimary = secondaryLayerText
     const nextTranslation = lyricsText
     onLyricsChange(nextPrimary)
-    setSecondaryLayerText(nextTranslation)
+    onSecondaryLayerChange(nextTranslation)
   }
 
   function handleSwapRomanization() {
     const nextPrimary = romanizationLayerText
     const nextRomanization = lyricsText
     onLyricsChange(nextPrimary)
-    setRomanizationLayerText(nextRomanization)
+    onRomanizationLayerChange(nextRomanization)
   }
 
   function handleApplyStackedLayers() {
     if (!stackedOutput) return
     onLyricsChange(stackedOutput)
-    setSecondaryLayerText('')
-    setRomanizationLayerText('')
+    onSecondaryLayerChange('')
+    onRomanizationLayerChange('')
     setActiveTab('raw')
   }
 
@@ -686,11 +707,11 @@ export function LyricsEditorPanel({
                     onLoadPrimary={() => onLoadCandidate(result)}
                     onToTranslation={() => {
                       const text = result.syncedLyrics ?? result.plainLyrics
-                      if (text) setSecondaryLayerText(text)
+                      if (text) onSecondaryLayerChange(text)
                     }}
                     onToRomanization={() => {
                       const text = result.syncedLyrics ?? result.plainLyrics
-                      if (text) setRomanizationLayerText(text)
+                      if (text) onRomanizationLayerChange(text)
                     }}
                   />
                 ))}
@@ -768,7 +789,7 @@ export function LyricsEditorPanel({
             </label>
             <textarea
               value={secondaryLayerText}
-              onChange={(event) => setSecondaryLayerText(event.target.value)}
+              onChange={(event) => onSecondaryLayerChange(event.target.value)}
               rows={4}
               placeholder="[00:01.00] Translated line matching primary timestamps..."
               title="Translation layer — stacked with the primary at matching timestamps"
@@ -782,7 +803,7 @@ export function LyricsEditorPanel({
             </label>
             <textarea
               value={romanizationLayerText}
-              onChange={(event) => setRomanizationLayerText(event.target.value)}
+              onChange={(event) => onRomanizationLayerChange(event.target.value)}
               rows={3}
               placeholder="[00:01.00] Romanized line (optional)..."
               title="Romanization layer — stacked after the translation at matching timestamps"

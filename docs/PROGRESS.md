@@ -1,7 +1,7 @@
 # Progress
 
 ## Current Phase
-Phase 4.5 desktop UI complete (Phase 3 audit fixes applied; pure selection/sync helpers; `@tanstack/react-virtual` library table with Shift/Ctrl selection; `<audio>` `media://` preview player with synchronous `onUnloadAudio` lock handshake and multi-line active display; raw/stacked LRC editor with offset nudge, normalize, opt-in A2 toggle, LRCLIB/sidecar fetch, `.lrc` import, drafts, and sequential embed; interactive Candidate Sifter over `LrclibProvider.searchAllCandidates`; primary/stacked live preview feeding both the clickable preview and the player). Remaining: interactive desktop walkthrough and Poweramp Android hardware spot-check.
+Phase 5 complete (native application menu with File/Edit/View/Playback/Help, typed `MenuAction`/`MenuSyncState` IPC, bare-Space-free accelerators Alt+P/Alt+S; dynamic flex workspace with collapsible sidebar, draggable split divider, and Edit/Layers/Find mode bar; compact track rows, three-mode editor with lifted translation/romanization layers, bottom-dock preview player with menu commands). Remaining: interactive desktop walkthrough and Poweramp Android hardware spot-check.
 
 ## Milestones
 - [x] Phase 0: Clean-slate workspace (`package.json`, `electron.vite.config.ts`, `tsconfig*.json`, `vitest.config.ts`, `electron-builder.yml`, `.gitignore`), dependencies installed (`electron@^45.4.1`, `taglib-wasm@^2.5.1`, Tailwind v4, Vitest, `@tanstack/react-virtual`), `electron-winstaller` install script denied, `taglib-wasi.wasm` verified on disk, multi-agent docs and handoff skill installed.
@@ -11,11 +11,12 @@ Phase 4.5 desktop UI complete (Phase 3 audit fixes applied; pure selection/sync 
 - [x] Phase 3: LRC parser/normalizer (`src/shared/lrc.ts`), `LyricsProvider` queue (LRCLIB + sibling `.lrc`), and stacked translation/romanization support.
 - [x] Phase 4 (UI): Virtualized track table (`@tanstack/react-virtual`), `<audio>` timestamp preview/scrubber with `onUnloadAudio` handshake, and raw/stacked LRC editor + fetch/embed workflows.
 - [x] Phase 4.5 (UI polish): Collapsible Candidate Sifter (`lyrics:searchCandidates` IPC + `LrclibProvider.searchAllCandidates`, `/api/get` + `/api/search` dedup, paced queue), focus-prefilled search fields with stale-response guards, per-result Load Primary / To Translation / To Romanization, send/swap translation+romanization toolbar, Primary Only / Stacked Preview toggle whose live output feeds both the clickable preview and `AudioPreviewPlayer` (`findActiveLineIndices`), and tooltips across editor/toolbar controls.
+- [x] Phase 5: Native app menu (`src/shared/menu.ts` pure template + `src/main/menu.ts` adapter, `MenuAction`/`MenuSyncState` IPC, no bare Space, Alt+P/Alt+S playback), dynamic workspace (collapsible library sidebar with draggable divider, Edit/Layers/Find mode bar, Raw/Split/Preview editor layout), compact track rows, three-mode editor with lifted translation/romanization layers, bottom-dock player with one-shot `PlayerCommand`. `tests/menu.test.ts` covers sanitization/accelerators/template.
 - [ ] Phase 4 (Verification): Interactive desktop walkthrough and Poweramp Android hardware spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav` + `.lrc`.
 
-## Verification (Phase 4.5 exit gate)
+## Verification (Phase 5 exit gate)
 - `npm run typecheck`: PASS (0 errors)
-- `npm test`: PASS (163/163 tests across 11 files)
+- `npm test`: PASS (176/176 tests across 12 files)
 - `npm run build`: PASS
 - `npm run build:unpack`: PASS
 - Packaged `--smoke-test`: PASS (`ready: true`, `2.5.1 (TagLib 2.3.2)`)

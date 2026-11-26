@@ -1,16 +1,31 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertCircle, CheckCircle2, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  AlertCircle,
+  CheckCircle2,
+  Columns2,
+  Eye,
+  FileCode,
+  Layers,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Search,
+  X
+} from 'lucide-react'
 import type {
+  EditorLayout,
   LibraryRoot,
   LyricsCandidate,
   LyricsFetchProgress,
   LyricsFetchRequest,
   LyricsSearchResult,
+  MenuAction,
+  MenuSyncState,
   ScanProgress,
   TagEngineHealth,
-  TrackRecord
+  TrackRecord,
+  WorkspaceMode
 } from '@shared/ipc'
-import { parseLrc } from '@shared/lrc'
+import { normalizeLrc, parseLrc } from '@shared/lrc'
 import { findActiveLineIndices } from '@shared/lyricsSync'
 import {
   applyTrackClick,
@@ -27,7 +42,7 @@ import { AudioPreviewPlayer } from './components/AudioPreviewPlayer'
 import { LibraryToolbar } from './components/LibraryToolbar'
 import { LyricsEditorPanel } from './components/LyricsEditorPanel'
 import { TrackTable } from './components/TrackTable'
-import type { SeekRequest, TrackEmbedStatus } from './types'
+import type { PlayerCommand, SeekRequest, TrackEmbedStatus } from './types'
 
 function toFetchRequest(track: TrackRecord): LyricsFetchRequest {
   return {
@@ -58,6 +73,9 @@ export function App() {
   const [preserveWordTags, setPreserveWordTags] = useState(false)
   /** Live preview text emitted by the editor (primary or stacked layers). */
   const [livePreview, setLivePreview] = useState<{ trackId: string; text: string } | null>(null)
+  /** Translation + romanization layers lifted so native menu actions can drive them. */
+  const [secondaryLayerText, setSecondaryLayerText] = useState('')
+  const [romanizationLayerText, setRomanizationLayerText] = useState('')
 
   const [sifterOpen, setSifterOpen] = useState(false)
   const [searchTitle, setSearchTitle] = useState('')
@@ -77,10 +95,41 @@ export function App() {
   )
   const [embedding, setEmbedding] = useState(false)
 
+  // --- Phase 5: Native menu + dynamic workspace state ---
+  const [sidebarVisible, setSidebarVisible] = useState(true)
+  const [sidebarWidth, setSidebarWidth] = useState(460)
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('edit')
+  const [editorLayout, setEditorLayout] = useState<EditorLayout>('split')
+
+  // Draggable split divider between the library sidebar and the workspace.
+  const dividerDragRef = useRef<{ startX: number; startWidth: number } | null>(null)
+  const handleDividerPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault()
+      dividerDragRef.current = { startX: event.clientX, startWidth: sidebarWidth }
+      event.currentTarget.setPointerCapture(event.pointerId)
+    },
+    [sidebarWidth]
+  )
+  const handleDividerPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dividerDragRef.current
+    if (!drag) return
+    const next = drag.startWidth + (event.clientX - drag.startX)
+    setSidebarWidth(Math.max(280, Math.min(900, next)))
+  }, [])
+  const handleDividerPointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    dividerDragRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }, [])
+
   const [loadedTrackId, setLoadedTrackId] = useState<string | null>(null)
   const [playbackTimeMs, setPlaybackTimeMs] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const [seekRequest, setSeekRequest] = useState<SeekRequest | null>(null)
+  /** One-shot imperative command from the native Playback menu. */
+  const [playerCommand, setPlayerCommand] = useState<PlayerCommand | null>(null)
 
   const [bannerError, setBannerError] = useState<string | null>(null)
   const [bannerStatus, setBannerStatus] = useState<string | null>(null)
@@ -120,6 +169,12 @@ export function App() {
 
   const focusedTrackId = focusedTrack?.id ?? null
 
+  // Reset lifted layer text whenever the focused track changes.
+  useEffect(() => {
+    setSecondaryLayerText('')
+    setRomanizationLayerText('')
+  }, [focusedTrackId])
+
   const activeLineTexts = useMemo(() => {
     if (!loadedTrackId) return []
     const useLivePreview =
@@ -152,6 +207,46 @@ export function App() {
     }
     return count
   }, [fetchProgressMap])
+
+  const menuSyncState = useMemo<MenuSyncState>(() => {
+    return {
+      hasFocusedTrack: focusedTrack !== null,
+      hasDraft: focusedTrack
+        ? Boolean(focusedTrack.draftId || draftTrackIds.has(focusedTrack.id))
+        : false,
+      isDirty: focusedTrack ? dirtyTrackIds.has(focusedTrack.id) : false,
+      hasLyrics: Boolean(focusedLyricsText),
+      workerReady: Boolean(health?.ready),
+      preserveWordTags,
+      sidebarVisible,
+      mode: workspaceMode,
+      editorLayout,
+      isPlaying,
+      canPlay: focusedTrack !== null,
+      canStop: loadedTrackId !== null,
+      selectedCount: selection.selectedIds.size,
+      embedding
+    }
+  }, [
+    focusedTrack,
+    draftTrackIds,
+    dirtyTrackIds,
+    focusedLyricsText,
+    health,
+    preserveWordTags,
+    sidebarVisible,
+    workspaceMode,
+    editorLayout,
+    isPlaying,
+    loadedTrackId,
+    selection.selectedIds.size,
+    embedding
+  ])
+
+  // Keep the native menu checkboxes/radios/enabled flags in sync with renderer state.
+  useEffect(() => {
+    void window.api.syncMenuState(menuSyncState)
+  }, [menuSyncState])
 
   const applyFetchedCandidate = useCallback(
     async (trackId: string, candidate: LyricsCandidate): Promise<boolean> => {
@@ -250,13 +345,18 @@ export function App() {
       }
     })
 
+    const unsubMenuAction = window.api.onMenuAction((action) => {
+      void handleMenuAction(action)
+    })
+
     return () => {
       active = false
       unsubScanProgress()
       unsubScanComplete()
       unsubFetchProgress()
+      unsubMenuAction()
     }
-  }, [applyFetchedCandidate])
+  }, [applyFetchedCandidate, handleMenuAction])
 
   // Load persisted draft when focusing a track not yet cached in draftTexts
   useEffect(() => {
@@ -678,6 +778,85 @@ export function App() {
     }
   }
 
+  async function handleMenuAction(action: MenuAction): Promise<void> {
+    switch (action) {
+      case 'add-library-folder':
+        await handleAddRoot()
+        break
+      case 'scan-all-roots':
+        await handleScan()
+        break
+      case 'import-lrc':
+        await handleImportLrc()
+        break
+      case 'save-draft':
+        if (focusedTrack) await handleSaveDraft(focusedTrack.id, focusedLyricsText)
+        break
+      case 'discard-draft':
+        if (focusedTrack) await handleDiscardDraft(focusedTrack.id)
+        break
+      case 'embed-current-track':
+        if (focusedTrack && !embedding) await handleEmbedFocused()
+        break
+      case 'normalize-lrc':
+        if (focusedTrack) {
+          handleLyricsChange(normalizeLrc(focusedLyricsText, { preserveWordTags }))
+        }
+        break
+      case 'toggle-preserve-word-tags':
+        setPreserveWordTags((prev) => !prev)
+        break
+      case 'send-primary-to-translation':
+        handleSendPrimaryToTranslation()
+        break
+      case 'send-primary-to-romanization':
+        handleSendPrimaryToRomanization()
+        break
+      case 'toggle-sidebar':
+        setSidebarVisible((prev) => !prev)
+        break
+      case 'mode-edit':
+        setWorkspaceMode('edit')
+        break
+      case 'mode-layers':
+        setWorkspaceMode('layers')
+        break
+      case 'mode-find':
+        setWorkspaceMode('find')
+        break
+      case 'layout-raw':
+        setEditorLayout('raw')
+        break
+      case 'layout-split':
+        setEditorLayout('split')
+        break
+      case 'layout-preview':
+        setEditorLayout('preview')
+        break
+      case 'toggle-play-pause':
+        setPlayerCommand({ kind: 'toggle', nonce: Date.now() + Math.random() })
+        break
+      case 'stop-and-unload':
+        setPlayerCommand({ kind: 'stop', nonce: Date.now() + Math.random() })
+        break
+      case 'show-tag-engine-status':
+        // Answered entirely in main (menu.ts showEngineStatusDialog).
+        break
+    }
+  }
+
+  function handleSendPrimaryToTranslation() {
+    if (!focusedTrack) return
+    setSecondaryLayerText(focusedLyricsText)
+    setWorkspaceMode('layers')
+  }
+
+  function handleSendPrimaryToRomanization() {
+    if (!focusedTrack) return
+    setRomanizationLayerText(focusedLyricsText)
+    setWorkspaceMode('layers')
+  }
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100">
       <LibraryToolbar
@@ -736,27 +915,152 @@ export function App() {
         </div>
       )}
 
-      <main className="grid flex-1 min-h-0 grid-cols-12 gap-3 overflow-hidden p-3">
-        <div className="col-span-7 flex min-h-0 flex-col">
-          <TrackTable
-            tracks={filteredTracks}
-            selection={selection}
-            draftTrackIds={draftTrackIds}
-            fetchProgressMap={fetchProgressMap}
-            embedStatusMap={embedStatusMap}
-            loadedTrackId={loadedTrackId}
-            isPlaying={isPlaying}
-            onRowClick={handleRowClick}
-            onSelectAll={() =>
-              setSelection((prev) => selectAllVisible(visibleTrackIds, prev.focusedId))
-            }
-            onClearSelection={() =>
-              setSelection((prev) => clearSelection(prev.focusedId))
-            }
-          />
-        </div>
+      <main className="flex flex-1 min-h-0 overflow-hidden bg-zinc-950">
+        {sidebarVisible && (
+          <div
+            className="flex shrink-0 min-h-0 flex-col border-r border-zinc-800 px-2 py-2"
+            style={{ width: `${sidebarWidth}px` }}
+          >
+            <TrackTable
+              tracks={filteredTracks}
+              selection={selection}
+              draftTrackIds={draftTrackIds}
+              fetchProgressMap={fetchProgressMap}
+              embedStatusMap={embedStatusMap}
+              loadedTrackId={loadedTrackId}
+              isPlaying={isPlaying}
+              onRowClick={handleRowClick}
+              onSelectAll={() =>
+                setSelection((prev) => selectAllVisible(visibleTrackIds, prev.focusedId))
+              }
+              onClearSelection={() =>
+                setSelection((prev) => clearSelection(prev.focusedId))
+              }
+            />
+          </div>
+        )}
 
-        <div className="col-span-5 flex min-h-0 flex-col">
+        {sidebarVisible && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize library sidebar"
+            title="Drag to resize the library sidebar"
+            onPointerDown={handleDividerPointerDown}
+            onPointerMove={handleDividerPointerMove}
+            onPointerUp={handleDividerPointerUp}
+            className="w-1 shrink-0 cursor-col-resize bg-zinc-800/80 transition-colors hover:bg-emerald-700/70 active:bg-emerald-600"
+          />
+        )}
+
+        <div className="flex min-w-0 flex-1 flex-col py-2 pr-2 pl-2 gap-2">
+          {/* Mode bar: workspace modes + editor layout + sidebar toggle */}
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-zinc-800 bg-zinc-900/80 px-2 py-1.5">
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                title={
+                  sidebarVisible
+                    ? 'Hide the library sidebar (Ctrl+B)'
+                    : 'Show the library sidebar (Ctrl+B)'
+                }
+                aria-label={sidebarVisible ? 'Hide library sidebar' : 'Show library sidebar'}
+                onClick={() => setSidebarVisible((prev) => !prev)}
+                className="mr-1 inline-flex items-center justify-center rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+              >
+                {sidebarVisible ? (
+                  <PanelLeftClose className="h-4 w-4" />
+                ) : (
+                  <PanelLeftOpen className="h-4 w-4" />
+                )}
+              </button>
+
+              <div
+                className="inline-flex overflow-hidden rounded-md border border-zinc-700"
+                role="group"
+                aria-label="Workspace mode"
+              >
+                <button
+                  type="button"
+                  aria-pressed={workspaceMode === 'edit'}
+                  title="Edit workspace: raw + stacked LRC editor (Ctrl+1)"
+                  onClick={() => setWorkspaceMode('edit')}
+                  className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium ${
+                    workspaceMode === 'edit'
+                      ? 'bg-zinc-700 text-zinc-100'
+                      : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                  }`}
+                >
+                  <FileCode className="h-3 w-3" />
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={workspaceMode === 'layers'}
+                  title="Layers workspace: translation + romanization stacking (Ctrl+2)"
+                  onClick={() => setWorkspaceMode('layers')}
+                  className={`inline-flex items-center gap-1 border-l border-zinc-700 px-2 py-1 text-[11px] font-medium ${
+                    workspaceMode === 'layers'
+                      ? 'bg-zinc-700 text-zinc-100'
+                      : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                  }`}
+                >
+                  <Layers className="h-3 w-3" />
+                  Layers
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={workspaceMode === 'find'}
+                  title="Find workspace: open the candidate sifter (Ctrl+3)"
+                  onClick={() => setWorkspaceMode('find')}
+                  className={`inline-flex items-center gap-1 border-l border-zinc-700 px-2 py-1 text-[11px] font-medium ${
+                    workspaceMode === 'find'
+                      ? 'bg-zinc-700 text-zinc-100'
+                      : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                  }`}
+                >
+                  <Search className="h-3 w-3" />
+                  Find
+                </button>
+              </div>
+            </div>
+
+            <div
+              className="inline-flex overflow-hidden rounded-md border border-zinc-700"
+              role="group"
+              aria-label="Editor layout"
+            >
+              <button
+                type="button"
+                aria-pressed={editorLayout === 'raw'}
+                title="Raw editor layout"
+                onClick={() => setEditorLayout('raw')}
+                className={`p-1 ${editorLayout === 'raw' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}
+              >
+                <FileCode className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                aria-pressed={editorLayout === 'split'}
+                title="Split editor layout (default)"
+                onClick={() => setEditorLayout('split')}
+                className={`border-l border-zinc-700 p-1 ${editorLayout === 'split' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}
+              >
+                <Columns2 className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                aria-pressed={editorLayout === 'preview'}
+                title="Preview-focused editor layout"
+                onClick={() => setEditorLayout('preview')}
+                className={`border-l border-zinc-700 p-1 ${editorLayout === 'preview' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}
+              >
+                <Eye className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex min-h-0 flex-1 flex-col">
           <LyricsEditorPanel
             focusedTrack={focusedTrack}
             selectedCount={selection.selectedIds.size}
@@ -795,6 +1099,7 @@ export function App() {
             }}
             onEmbedFocused={() => void handleEmbedFocused()}
             onPreviewTextChange={handlePreviewTextChange}
+            mode={workspaceMode}
             sifterOpen={sifterOpen}
             onSifterOpenChange={setSifterOpen}
             searchTitle={searchTitle}
@@ -811,7 +1116,12 @@ export function App() {
             searchSearched={searchSearched}
             onSearchCandidates={() => void handleSearchCandidates()}
             onLoadCandidate={(result) => void handleLoadCandidate(result)}
+            secondaryLayerText={secondaryLayerText}
+            onSecondaryLayerChange={setSecondaryLayerText}
+            romanizationLayerText={romanizationLayerText}
+            onRomanizationLayerChange={setRomanizationLayerText}
           />
+          </div>
         </div>
       </main>
 
@@ -819,6 +1129,7 @@ export function App() {
         focusedTrack={focusedTrack}
         activeLineTexts={activeLineTexts}
         seekRequest={seekRequest}
+        playerCommand={playerCommand}
         onPlaybackChange={(nextLoadedId, nextTimeMs, nextPlaying) => {
           setLoadedTrackId(nextLoadedId)
           setPlaybackTimeMs(nextTimeMs)

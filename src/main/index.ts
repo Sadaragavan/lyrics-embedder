@@ -46,6 +46,7 @@ import {
 } from './mediaProtocol'
 import { createStore, computeTrackId, type JsonStore } from './store'
 import { cleanupStaleTempFiles, isSupportedAudioPath } from './tagger'
+import { disposeApplicationMenu, setupApplicationMenu, updateMenuState } from './menu'
 import { isPathWithinRoots } from './utils/pathContainment'
 import { isValidTrackId, normalizePathKey, resolveRealPath } from './utils/trackId'
 import { resolveTaglibWasmPath } from './wasmPath'
@@ -857,6 +858,11 @@ function registerIpcHandlers(): void {
     resolve()
   })
 
+  // Renderer-owned menu state (checkbox/radio/enabled flags).
+  ipcMain.on(IPC_CHANNELS.menuSyncState, (_event, rawState: unknown) => {
+    updateMenuState(rawState)
+  })
+
   // --- Lyrics provider IPC handlers ---
 
   ipcMain.handle(IPC_CHANNELS.selectLrcFile, async (): Promise<string | null> => {
@@ -1035,6 +1041,12 @@ void app.whenReady().then(async () => {
 
   await createMainWindow()
 
+  setupApplicationMenu({
+    getWindow: () => mainWindow,
+    getHealth: () => latestHealth,
+    dispatch: (action) => sendToRenderer(IPC_CHANNELS.menuAction, action)
+  })
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       void createMainWindow()
@@ -1061,6 +1073,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true
+  disposeApplicationMenu()
   lyricsFetchQueue?.dispose()
   for (const [, resolve] of pendingUnloads) {
     resolve()

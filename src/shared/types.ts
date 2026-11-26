@@ -146,6 +146,65 @@ export interface LyricsProvider {
 
 export type LyricsFetchPhase = 'idle' | 'fetching' | 'done' | 'error' | 'cancelled'
 
+// --- Phase 5: Native menu + dynamic workspace ---
+
+/** Every actionable command a native menu item can dispatch to the renderer. */
+export const MENU_ACTIONS = [
+  'add-library-folder',
+  'scan-all-roots',
+  'import-lrc',
+  'save-draft',
+  'discard-draft',
+  'embed-current-track',
+  'normalize-lrc',
+  'toggle-preserve-word-tags',
+  'send-primary-to-translation',
+  'send-primary-to-romanization',
+  'toggle-sidebar',
+  'mode-edit',
+  'mode-layers',
+  'mode-find',
+  'layout-raw',
+  'layout-split',
+  'layout-preview',
+  'toggle-play-pause',
+  'stop-and-unload',
+  'show-tag-engine-status'
+] as const
+
+export type MenuAction = (typeof MENU_ACTIONS)[number]
+
+export function isMenuAction(value: unknown): value is MenuAction {
+  return typeof value === 'string' && (MENU_ACTIONS as readonly string[]).includes(value)
+}
+
+/** Right-workspace mode selected from the View menu or the in-app mode bar. */
+export type WorkspaceMode = 'edit' | 'layers' | 'find'
+
+/** Edit-mode layout selected from the View > Editor Layout submenu. */
+export type EditorLayout = 'raw' | 'split' | 'preview'
+
+/**
+ * Renderer-owned menu state. The main process rebuilds the native menu from
+ * this snapshot so checkboxes, radios, and enabled flags stay in sync.
+ */
+export interface MenuSyncState {
+  hasFocusedTrack: boolean
+  hasDraft: boolean
+  isDirty: boolean
+  hasLyrics: boolean
+  workerReady: boolean
+  preserveWordTags: boolean
+  sidebarVisible: boolean
+  mode: WorkspaceMode
+  editorLayout: EditorLayout
+  isPlaying: boolean
+  canPlay: boolean
+  canStop: boolean
+  selectedCount: number
+  embedding: boolean
+}
+
 export interface LyricsFetchProgress {
   trackId: string
   phase: LyricsFetchPhase
