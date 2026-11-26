@@ -15,14 +15,6 @@ export interface SeekRequest {
   nonce: number
 }
 
-/** One-shot imperative command from the native menu to the editor panel. */
-export type EditorCommandKind = 'normalize' | 'to-translation' | 'to-romanization'
-
-export interface EditorCommand {
-  kind: EditorCommandKind
-  nonce: number
-}
-
 /** One-shot imperative command from the native menu to the audio player. */
 export type PlayerCommandKind = 'toggle' | 'stop'
 

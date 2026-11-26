@@ -21,6 +21,7 @@ import {
   type LibraryRoot,
   type LyricsFetchRequest,
   type LyricsProviderId,
+  type LyricsProvider,
   type LyricsSearchRequest,
   type LyricsSearchResult,
   type MediaUnloadAck,
@@ -49,10 +50,15 @@ import { cleanupStaleTempFiles, isSupportedAudioPath } from './tagger'
 import { disposeApplicationMenu, setupApplicationMenu, updateMenuState } from './menu'
 import { isPathWithinRoots } from './utils/pathContainment'
 import { isValidTrackId, normalizePathKey, resolveRealPath } from './utils/trackId'
+import { scoreCandidate } from '@shared/trackMatching'
 import { resolveTaglibWasmPath } from './wasmPath'
 import { createLyricsFetchQueue, type LyricsFetchQueue } from './providers/queue'
 import { LrclibProvider } from './providers/lrclib'
-import { createLocalSidecarProvider, importLrcFile } from './providers/localSidecar'
+import {
+  createLocalSidecarProvider,
+  getSidecarPath,
+  importLrcFile
+} from './providers/localSidecar'
 
 const MAX_LYRICS_BYTES = 1024 * 1024
 const MAX_QUERY_FIELD_CHARS = 512
@@ -86,6 +92,7 @@ const activeTargetDirs = new Map<string, number>()
 let store: JsonStore | null = null
 let lyricsFetchQueue: LyricsFetchQueue | null = null
 let lrclibProvider: LrclibProvider | null = null
+let localSidecarProvider: LyricsProvider | null = null
 // Tracks `.lrc` file real paths explicitly chosen by the user via native open dialog.
 const authorizedDialogLrcPaths = new Set<string>()
 
@@ -944,7 +951,57 @@ function registerIpcHandlers(): void {
         throw new Error('LRCLIB provider not initialized')
       }
       const request = await prepareAuthorizedLyricsSearch(rawPayload)
-      return lrclibProvider.searchAllCandidates(request)
+
+      // A sibling `.lrc` next to the file always wins: prepend it so the sifter
+      // lists the exact-file sidecar ahead of remote LRCLIB matches.
+      const results: LyricsSearchResult[] = []
+      if (localSidecarProvider) {
+        try {
+          const localCandidate = await localSidecarProvider.fetch({
+            trackId: request.trackId,
+            title: request.title,
+            artist: request.artist,
+            album: request.album,
+            durationSec: request.durationSec,
+            filePath: request.filePath,
+            providerIds: ['localSidecar']
+          })
+          const text = localCandidate?.syncedLyrics ?? localCandidate?.plainLyrics
+          if (localCandidate && text) {
+            const scored = scoreCandidate({
+              queryTitle: request.title,
+              queryArtist: request.artist,
+              queryAlbum: request.album,
+              queryDurationSec: request.durationSec,
+              candidateTitle: request.title,
+              candidateArtist: request.artist,
+              candidateAlbum: request.album,
+              candidateDurationSec: request.durationSec,
+              syncedLyrics: localCandidate.syncedLyrics,
+              plainLyrics: localCandidate.plainLyrics,
+              isLocalSidecar: true
+            })
+            results.push({
+              providerId: 'localSidecar',
+              sourceId: `sidecar:${path.basename(request.filePath)}`,
+              sourceRef: getSidecarPath(request.filePath),
+              title: request.title,
+              artist: request.artist,
+              album: request.album,
+              durationSec: request.durationSec,
+              syncedLyrics: localCandidate.syncedLyrics,
+              plainLyrics: localCandidate.plainLyrics,
+              score: scored.score,
+              timingKind: localCandidate.timingKind ?? scored.timingKind
+            })
+          }
+        } catch (error) {
+          console.error('[lyrics] local sidecar candidate lookup failed:', error)
+        }
+      }
+
+      const remote = await lrclibProvider.searchAllCandidates(request)
+      return [...results, ...remote]
     }
   )
 }
@@ -998,9 +1055,10 @@ async function initializePersistence(): Promise<void> {
 
 function initializeLyricsFetchQueue(): void {
   lrclibProvider = new LrclibProvider()
+  localSidecarProvider = createLocalSidecarProvider()
   lyricsFetchQueue = createLyricsFetchQueue({
     providers: [
-      createLocalSidecarProvider(),
+      localSidecarProvider!,
       lrclibProvider
     ],
     onProgress: (progress) => {

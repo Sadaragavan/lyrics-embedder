@@ -264,14 +264,22 @@ export function scoreCandidate(input: CandidateScoreInput): CandidateScore {
     input.plainLyrics ?? null
   )
 
+  // Fall back to the raw title when cleaning strips everything (e.g. a title
+  // that is entirely a parenthetical descriptor).
+  const candidateTitleRaw = input.candidateTitle ?? ''
+  const queryTitleRaw = input.queryTitle
   const titleSimilarity = textSimilarity(
-    cleanTrackTitle(input.candidateTitle ?? ''),
-    cleanTrackTitle(input.queryTitle)
+    cleanTrackTitle(candidateTitleRaw) || candidateTitleRaw,
+    cleanTrackTitle(queryTitleRaw) || queryTitleRaw
   )
-  const artistSimilarity = textSimilarity(
-    input.candidateArtist ?? '',
-    input.queryArtist
-  )
+  // Multi-artist credits: the candidate matches when any single credited artist
+  // matches, so score against the full credit and every split entry.
+  const candidateArtist = input.candidateArtist ?? ''
+  let artistSimilarity = textSimilarity(candidateArtist, input.queryArtist)
+  for (const artist of splitArtists(input.queryArtist)) {
+    const similarity = textSimilarity(candidateArtist, artist)
+    if (similarity > artistSimilarity) artistSimilarity = similarity
+  }
   const { adjustment: durationAdjustmentPoints, delta: durationDeltaSec } = durationAdjustment(
     input.queryDurationSec,
     input.candidateDurationSec

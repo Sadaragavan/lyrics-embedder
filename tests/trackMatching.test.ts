@@ -174,6 +174,49 @@ describe('scoreCandidate', () => {
     expect(withAlbum.score).toBeGreaterThan(withoutAlbum.score)
   })
 
+  it('scores a multi-artist query against the best matching credited artist', () => {
+    const multi = scoreCandidate({
+      ...base,
+      queryArtist: 'Main Artist; Feature Guest',
+      candidateArtist: 'Feature Guest',
+      syncedLyrics: '[00:01.00]Hi',
+      candidateDurationSec: 240
+    })
+    const none = scoreCandidate({
+      ...base,
+      queryArtist: 'Main Artist; Feature Guest',
+      candidateArtist: 'Unrelated Band',
+      syncedLyrics: '[00:01.00]Hi',
+      candidateDurationSec: 240
+    })
+    expect(multi.artistSimilarity).toBe(1)
+    expect(none.artistSimilarity).toBe(0)
+    expect(multi.score).toBeGreaterThan(none.score)
+  })
+
+  it('takes the maximum artist similarity across every split entry', () => {
+    const result = scoreCandidate({
+      ...base,
+      queryArtist: 'Alpha, Beta & Gamma',
+      candidateArtist: 'gamma',
+      syncedLyrics: '[00:01.00]Hi',
+      candidateDurationSec: 240
+    })
+    expect(result.artistSimilarity).toBe(1)
+  })
+
+  it('falls back to the raw title when cleaning strips it to an empty string', () => {
+    const result = scoreCandidate({
+      ...base,
+      queryTitle: '(Official Video)',
+      candidateTitle: '(Official Video)',
+      syncedLyrics: '[00:01.00]Hi',
+      candidateDurationSec: 240
+    })
+    expect(cleanTrackTitle('(Official Video)')).toBe('')
+    expect(result.titleSimilarity).toBe(1)
+  })
+
   it('applies the local synced baseline of 100', () => {
     const local = scoreCandidate({
       ...base,

@@ -97,6 +97,32 @@ function asEditorLayout(value: unknown): EditorLayout {
 }
 
 /**
+ * Shallow-compares two already-sanitized snapshots field by field.
+ *
+ * The renderer pushes a snapshot on every render, so the main process must be
+ * able to detect a no-op update and skip rebuilding the native menu (which
+ * re-creates every menu item and re-triggers menu-related work).
+ */
+export function menuStateEquals(a: MenuSyncState, b: MenuSyncState): boolean {
+  return (
+    a.hasFocusedTrack === b.hasFocusedTrack &&
+    a.hasDraft === b.hasDraft &&
+    a.isDirty === b.isDirty &&
+    a.hasLyrics === b.hasLyrics &&
+    a.workerReady === b.workerReady &&
+    a.preserveWordTags === b.preserveWordTags &&
+    a.sidebarVisible === b.sidebarVisible &&
+    a.mode === b.mode &&
+    a.editorLayout === b.editorLayout &&
+    a.isPlaying === b.isPlaying &&
+    a.canPlay === b.canPlay &&
+    a.canStop === b.canStop &&
+    a.selectedCount === b.selectedCount &&
+    a.embedding === b.embedding
+  )
+}
+
+/**
  * Defensively normalizes an untrusted renderer payload into a `MenuSyncState`.
  * Unknown shapes fall back to defaults; enums are allow-listed and the selected
  * count is clamped to a sane integer range.

@@ -39,10 +39,30 @@ import {
   type TrackSelectionState
 } from '@shared/trackSelection'
 import { AudioPreviewPlayer } from './components/AudioPreviewPlayer'
-import { LibraryToolbar } from './components/LibraryToolbar'
+import { LibrarySidebar } from './components/LibrarySidebar'
 import { LyricsEditorPanel } from './components/LyricsEditorPanel'
 import { TrackTable } from './components/TrackTable'
 import type { PlayerCommand, SeekRequest, TrackEmbedStatus } from './types'
+
+const SIDEBAR_WIDTH_KEY = 'lyrics-embedder:sidebar-width'
+const SIDEBAR_MIN_WIDTH = 280
+const SIDEBAR_MAX_WIDTH = 720
+
+function clampSidebarWidth(value: number): number {
+  if (!Number.isFinite(value)) return SIDEBAR_MIN_WIDTH
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(value)))
+}
+
+function readStoredSidebarWidth(): number {
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY)
+    if (!raw) return 460
+    const parsed = Number.parseInt(raw, 10)
+    return Number.isFinite(parsed) ? clampSidebarWidth(parsed) : 460
+  } catch {
+    return 460
+  }
+}
 
 function toFetchRequest(track: TrackRecord): LyricsFetchRequest {
   return {
@@ -77,7 +97,6 @@ export function App() {
   const [secondaryLayerText, setSecondaryLayerText] = useState('')
   const [romanizationLayerText, setRomanizationLayerText] = useState('')
 
-  const [sifterOpen, setSifterOpen] = useState(false)
   const [searchTitle, setSearchTitle] = useState('')
   const [searchArtist, setSearchArtist] = useState('')
   const [searchAlbum, setSearchAlbum] = useState('')
@@ -97,7 +116,7 @@ export function App() {
 
   // --- Phase 5: Native menu + dynamic workspace state ---
   const [sidebarVisible, setSidebarVisible] = useState(true)
-  const [sidebarWidth, setSidebarWidth] = useState(460)
+  const [sidebarWidth, setSidebarWidth] = useState(() => readStoredSidebarWidth())
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('edit')
   const [editorLayout, setEditorLayout] = useState<EditorLayout>('split')
 
@@ -115,8 +134,17 @@ export function App() {
     const drag = dividerDragRef.current
     if (!drag) return
     const next = drag.startWidth + (event.clientX - drag.startX)
-    setSidebarWidth(Math.max(280, Math.min(900, next)))
+    setSidebarWidth(clampSidebarWidth(next))
   }, [])
+
+  // Persist the sidebar width so the 1366x768 layout survives reloads.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth))
+    } catch {
+      // Storage can be unavailable (private mode); the width is cosmetic.
+    }
+  }, [sidebarWidth])
   const handleDividerPointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     dividerDragRef.current = null
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -140,6 +168,13 @@ export function App() {
   draftTextsRef.current = draftTexts
   /** Invalidates in-flight candidate searches when focus changes. */
   const searchNonceRef = useRef(0)
+  /**
+   * Holds the current `handleMenuAction` so the startup effect can subscribe to
+   * native menu events exactly once. Without this the effect re-ran on every
+   * render (re-issuing getHealth/getRoots/getTracks and re-subscribing IPC
+   * listeners), which drove the render -> IPC -> menu rebuild loop.
+   */
+  const handleMenuActionRef = useRef<(action: MenuAction) => Promise<void>>(async () => undefined)
 
   const filteredTracks = useMemo(
     () =>
@@ -175,30 +210,36 @@ export function App() {
     setRomanizationLayerText('')
   }, [focusedTrackId])
 
-  const activeLineTexts = useMemo(() => {
-    if (!loadedTrackId) return []
+  /**
+   * Lyrics text currently driving the audio player's active lines.
+   * Kept separate from `playbackTimeMs` so `parseLrc` runs only when the text
+   * changes rather than on every 60fps RAF playback tick.
+   */
+  const loadedTrackLyricsText = useMemo(() => {
+    if (!loadedTrackId) return ''
     const useLivePreview =
       focusedTrackId === loadedTrackId &&
       livePreview !== null &&
       livePreview.trackId === loadedTrackId
+    if (useLivePreview) return livePreview.text
     const loadedTrack = tracks.find((t) => t.id === loadedTrackId)
-    const lyrics = useLivePreview
-      ? livePreview.text
-      : (draftTexts.get(loadedTrackId) ?? loadedTrack?.lyrics ?? '')
-    if (!lyrics) return []
-    const lines = parseLrc(lyrics, { preserveWordTags })
-    return findActiveLineIndices(lines, playbackTimeMs).map(
-      (index) => lines[index]?.text || '(instrumental)'
+    return draftTexts.get(loadedTrackId) ?? loadedTrack?.lyrics ?? ''
+  }, [loadedTrackId, focusedTrackId, livePreview, tracks, draftTexts])
+
+  const loadedTrackParsedLines = useMemo(
+    () =>
+      loadedTrackLyricsText
+        ? parseLrc(loadedTrackLyricsText, { preserveWordTags })
+        : [],
+    [loadedTrackLyricsText, preserveWordTags]
+  )
+
+  const activeLineTexts = useMemo(() => {
+    if (loadedTrackParsedLines.length === 0) return []
+    return findActiveLineIndices(loadedTrackParsedLines, playbackTimeMs).map(
+      (index) => loadedTrackParsedLines[index]?.text || '(instrumental)'
     )
-  }, [
-    loadedTrackId,
-    focusedTrackId,
-    livePreview,
-    tracks,
-    draftTexts,
-    preserveWordTags,
-    playbackTimeMs
-  ])
+  }, [loadedTrackParsedLines, playbackTimeMs])
 
   const activeFetchCount = useMemo(() => {
     let count = 0
@@ -346,7 +387,7 @@ export function App() {
     })
 
     const unsubMenuAction = window.api.onMenuAction((action) => {
-      void handleMenuAction(action)
+      void handleMenuActionRef.current(action)
     })
 
     return () => {
@@ -356,7 +397,7 @@ export function App() {
       unsubFetchProgress()
       unsubMenuAction()
     }
-  }, [applyFetchedCandidate, handleMenuAction])
+  }, [applyFetchedCandidate])
 
   // Load persisted draft when focusing a track not yet cached in draftTexts
   useEffect(() => {
@@ -845,6 +886,9 @@ export function App() {
     }
   }
 
+  // Always point the ref at the latest closure (menu actions read live state).
+  handleMenuActionRef.current = handleMenuAction
+
   function handleSendPrimaryToTranslation() {
     if (!focusedTrack) return
     setSecondaryLayerText(focusedLyricsText)
@@ -858,36 +902,15 @@ export function App() {
   }
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100">
-      <LibraryToolbar
-        health={health}
-        roots={roots}
-        activeRootFilter={activeRootFilter}
-        onActiveRootFilterChange={setActiveRootFilter}
-        tracksCount={tracks.length}
-        filteredCount={filteredTracks.length}
-        selectedCount={selection.selectedIds.size}
-        scanning={scanning}
-        scanProgress={scanProgress}
-        search={search}
-        onSearchChange={setSearch}
-        statusFilter={statusFilter}
-        onStatusFilterChange={setStatusFilter}
-        activeFetchCount={activeFetchCount}
-        lastFetchError={lastFetchError}
-        embedding={embedding}
-        onAddRoot={() => void handleAddRoot()}
-        onRemoveRoot={(id) => void handleRemoveRoot(id)}
-        onScanAll={() => void handleScan()}
-        onScanRoot={(id) => void handleScan(id)}
-        onFetchSelected={() => void handleFetchSelected()}
-        onCancelActiveFetches={() => void handleCancelActiveFetches()}
-        onEmbedSelected={() => void handleEmbedSelected()}
-      />
-
+    <div className="relative flex h-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100">
+      {/*
+        Transient status toast. It floats over the workspace instead of taking a
+        permanent row so the 1366x768 layout keeps zero top chrome.
+      */}
       {(bannerError || bannerStatus) && (
         <div
-          className={`flex shrink-0 items-center justify-between gap-2 border-b px-4 py-1.5 text-xs ${
+          role="status"
+          className={`absolute left-1/2 top-2 z-40 flex w-[min(560px,90vw)] -translate-x-1/2 items-center justify-between gap-2 rounded-md border px-3 py-1.5 text-xs shadow-lg shadow-black/50 ${
             bannerError
               ? 'border-red-900/80 bg-red-950/60 text-red-200'
               : 'border-emerald-900/80 bg-emerald-950/40 text-emerald-200'
@@ -921,6 +944,32 @@ export function App() {
             className="flex shrink-0 min-h-0 flex-col border-r border-zinc-800 px-2 py-2"
             style={{ width: `${sidebarWidth}px` }}
           >
+            <LibrarySidebar
+              health={health}
+              roots={roots}
+              activeRootFilter={activeRootFilter}
+              onActiveRootFilterChange={setActiveRootFilter}
+              tracksCount={tracks.length}
+              filteredCount={filteredTracks.length}
+              selectedCount={selection.selectedIds.size}
+              scanning={scanning}
+              scanProgress={scanProgress}
+              search={search}
+              onSearchChange={setSearch}
+              statusFilter={statusFilter}
+              onStatusFilterChange={setStatusFilter}
+              activeFetchCount={activeFetchCount}
+              lastFetchError={lastFetchError}
+              embedding={embedding}
+              onAddRoot={() => void handleAddRoot()}
+              onRemoveRoot={(id) => void handleRemoveRoot(id)}
+              onScanAll={() => void handleScan()}
+              onScanRoot={(id) => void handleScan(id)}
+              onFetchSelected={() => void handleFetchSelected()}
+              onCancelActiveFetches={() => void handleCancelActiveFetches()}
+              onEmbedSelected={() => void handleEmbedSelected()}
+              onClearSelection={() => setSelection((prev) => clearSelection(prev.focusedId))}
+            />
             <TrackTable
               tracks={filteredTracks}
               selection={selection}
@@ -1098,10 +1147,15 @@ export function App() {
               if (focusedTrack) void handleDiscardDraft(focusedTrack.id)
             }}
             onEmbedFocused={() => void handleEmbedFocused()}
+            onNormalize={() => {
+              if (focusedTrack) {
+                handleLyricsChange(normalizeLrc(focusedLyricsText, { preserveWordTags }))
+              }
+            }}
             onPreviewTextChange={handlePreviewTextChange}
             mode={workspaceMode}
-            sifterOpen={sifterOpen}
-            onSifterOpenChange={setSifterOpen}
+            onModeChange={setWorkspaceMode}
+            editorLayout={editorLayout}
             searchTitle={searchTitle}
             onSearchTitleChange={setSearchTitle}
             searchArtist={searchArtist}
@@ -1130,6 +1184,7 @@ export function App() {
         activeLineTexts={activeLineTexts}
         seekRequest={seekRequest}
         playerCommand={playerCommand}
+        health={health}
         onPlaybackChange={(nextLoadedId, nextTimeMs, nextPlaying) => {
           setLoadedTrackId(nextLoadedId)
           setPlaybackTimeMs(nextTimeMs)

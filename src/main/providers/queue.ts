@@ -26,9 +26,10 @@ export interface LyricsFetchQueueOptions {
   providers: LyricsProvider[]
   onProgress?: ProgressListener
   /**
-   * When true (default), line-synced remote results are retained only as
-   * fallbacks while word-synced results are preferred. Local sidecars remain
-   * authoritative and are accepted immediately.
+   * When true, line-synced remote results are retained only as fallbacks while
+   * word-synced results are preferred. Defaults to `false`: standard
+   * line-synced `[mm:ss.xx]` LRC is the product default and A2 word tags are
+   * opt-in (see `AGENTS.md`). Local sidecars remain authoritative.
    */
   preferWordSynced?: boolean
 }
@@ -55,7 +56,7 @@ export class LyricsFetchQueue {
     this.providers = [...options.providers]
     this.providerMap = new Map(this.providers.map((provider) => [provider.id, provider]))
     this.onProgress = options.onProgress
-    this.preferWordSynced = options.preferWordSynced ?? true
+    this.preferWordSynced = options.preferWordSynced ?? false
   }
 
   private emitProgress(

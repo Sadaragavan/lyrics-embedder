@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pause, Play, Square, Volume2 } from 'lucide-react'
-import type { TrackRecord } from '@shared/ipc'
+import type { TagEngineHealth, TrackRecord } from '@shared/ipc'
 import { formatDuration } from '@shared/lyricsSync'
 import type { PlayerCommand, SeekRequest } from '../types'
 
@@ -11,6 +11,8 @@ export interface AudioPreviewPlayerProps {
   seekRequest: SeekRequest | null
   /** One-shot command from the native Playback menu. */
   playerCommand: PlayerCommand | null
+  /** TagLib / WASI worker health, rendered as a quiet status dot. */
+  health?: TagEngineHealth | null
   onPlaybackChange: (loadedTrackId: string | null, timeMs: number, isPlaying: boolean) => void
   onPlayerError: (message: string) => void
 }
@@ -24,6 +26,7 @@ export function AudioPreviewPlayer({
   activeLineTexts,
   seekRequest,
   playerCommand,
+  health = null,
   onPlaybackChange,
   onPlayerError
 }: AudioPreviewPlayerProps) {
@@ -249,7 +252,7 @@ export function AudioPreviewPlayer({
     durationSec > 0 ? durationSec : (focusedTrack?.durationSec ?? 0)
 
   return (
-    <footer className="shrink-0 h-[70px] border-t border-zinc-800 bg-zinc-900/95 px-4 flex items-center gap-3">
+    <footer className="flex h-[70px] shrink-0 items-center gap-3 border-t border-zinc-800 bg-zinc-900/95 px-4">
       <audio
         ref={audioRef}
         preload="metadata"
@@ -301,8 +304,8 @@ export function AudioPreviewPlayer({
         }}
       />
 
-      <div className="flex items-center gap-3">
-        <div className="flex items-center gap-1.5 shrink-0">
+      <div className="flex w-full flex-1 min-w-0 items-center gap-3">
+        <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
             aria-label={isPlaying && loadedTrackId === focusedTrack?.id ? 'Pause' : 'Play'}
@@ -333,7 +336,7 @@ export function AudioPreviewPlayer({
           </button>
         </div>
 
-        <div className="w-56 shrink-0 min-w-0">
+        <div className="w-52 min-w-0 shrink-0">
           <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-100 truncate">
             <Volume2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
             <span className="truncate">
@@ -358,7 +361,7 @@ export function AudioPreviewPlayer({
           </div>
         </div>
 
-        <div className="flex flex-1 items-center gap-2 min-w-0">
+        <div className="flex flex-1 min-w-0 items-center gap-2">
           <span className="w-10 text-right font-mono text-[11px] tabular-nums text-zinc-400">
             {formatDuration(currentTimeSec)}
           </span>
@@ -372,12 +375,33 @@ export function AudioPreviewPlayer({
             value={Math.min(currentTimeSec, Math.max(effectiveDuration, 1))}
             disabled={!loadedTrackId}
             onChange={(event) => handleScrub(Number.parseFloat(event.target.value))}
-            className="h-1.5 flex-1 cursor-pointer accent-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+            className="h-1.5 min-w-0 w-full flex-1 cursor-pointer accent-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
           />
-          <span className="w-10 font-mono text-[11px] tabular-nums text-zinc-400">
+          <span className="w-10 shrink-0 font-mono text-[11px] tabular-nums text-zinc-400">
             {formatDuration(effectiveDuration)}
           </span>
         </div>
+
+        {/*
+          Quiet TagLib / WASI engine indicator: green when the utility-process
+          tag engine is ready, amber (with the error in the tooltip) otherwise.
+        */}
+        <span
+          title={
+            health?.ready
+              ? `TagLib ${health.taglibVersion ?? 'ready'} (PID ${health.workerPid ?? '?'})`
+              : (health?.error ?? 'Tag engine initializing')
+          }
+          className="flex shrink-0 items-center gap-1 text-[10px] text-zinc-500"
+        >
+          <span
+            aria-hidden
+            className={`h-1.5 w-1.5 rounded-full ${
+              health?.ready ? 'bg-emerald-400' : 'bg-amber-400'
+            }`}
+          />
+          TagLib
+        </span>
       </div>
     </footer>
   )

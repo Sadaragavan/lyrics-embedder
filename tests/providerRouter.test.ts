@@ -53,13 +53,74 @@ describe('evaluateCandidate', () => {
     expect(result.decision).toBe('REJECT')
   })
 
-  it('accepts word-synced as final', () => {
-    const result = evaluateCandidate({ ...base, timingKind: 'word' })
+  it('accepts a high-confidence word-synced candidate as final', () => {
+    const result = evaluateCandidate({ ...base, timingKind: 'word', score: 80 })
     expect(result.decision).toBe('ACCEPT_FINAL')
   })
 
+  it('rejects wrong-song / low-score line candidates instead of accepting them', () => {
+    // A `line` candidate for the wrong song used to be ACCEPT_FINAL; the
+    // confidence gate must reject it so the queue keeps searching.
+    const wrongSong = evaluateCandidate({ ...base, timingKind: 'line', score: 20 })
+    expect(wrongSong.decision).toBe('REJECT')
+    expect(wrongSong.reason).toMatch(/wrong-song/)
+
+    const lowScoreWord = evaluateCandidate({ ...base, timingKind: 'word', score: 10 })
+    expect(lowScoreWord.decision).toBe('REJECT')
+  })
+
+  it('rejects non-local candidates whose duration differs by more than 30s', () => {
+    const result = evaluateCandidate({
+      ...base,
+      timingKind: 'line',
+      score: 90,
+      durationDeltaSec: 31
+    })
+    expect(result.decision).toBe('REJECT')
+    expect(result.reason).toMatch(/duration mismatch/)
+  })
+
+  it('accepts a high-score line candidate within 5s as final', () => {
+    const result = evaluateCandidate({
+      ...base,
+      timingKind: 'line',
+      score: 75,
+      durationDeltaSec: 4
+    })
+    expect(result.decision).toBe('ACCEPT_FINAL')
+  })
+
+  it('treats an unknown duration delta as acceptable for a high-score match', () => {
+    const result = evaluateCandidate({ ...base, timingKind: 'line', score: 72 })
+    expect(result.decision).toBe('ACCEPT_FINAL')
+  })
+
+  it('keeps mid-confidence (>= 35) line candidates as fallback', () => {
+    const midScore = evaluateCandidate({
+      ...base,
+      timingKind: 'line',
+      score: 55,
+      durationDeltaSec: 2
+    })
+    expect(midScore.decision).toBe('KEEP_AS_FALLBACK')
+
+    const farDuration = evaluateCandidate({
+      ...base,
+      timingKind: 'line',
+      score: 95,
+      durationDeltaSec: 12
+    })
+    expect(farDuration.decision).toBe('KEEP_AS_FALLBACK')
+    expect(farDuration.reason).toMatch(/duration delta/)
+  })
+
   it('keeps line-synced as fallback when preferWordSynced is true and not local', () => {
-    const result = evaluateCandidate({ ...base, timingKind: 'line', preferWordSynced: true })
+    const result = evaluateCandidate({
+      ...base,
+      timingKind: 'line',
+      score: 90,
+      preferWordSynced: true
+    })
     expect(result.decision).toBe('KEEP_AS_FALLBACK')
     expect(result.reason).toMatch(/prefer word/)
   })
@@ -68,6 +129,8 @@ describe('evaluateCandidate', () => {
     const result = evaluateCandidate({
       ...base,
       timingKind: 'line',
+      score: 40,
+      durationDeltaSec: 90,
       preferWordSynced: true,
       isLocalSidecar: true
     })
@@ -75,7 +138,7 @@ describe('evaluateCandidate', () => {
   })
 
   it('accepts line-synced as final when preferWordSynced is false', () => {
-    const result = evaluateCandidate({ ...base, timingKind: 'line', preferWordSynced: false })
+    const result = evaluateCandidate({ ...base, timingKind: 'line', score: 90 })
     expect(result.decision).toBe('ACCEPT_FINAL')
   })
 

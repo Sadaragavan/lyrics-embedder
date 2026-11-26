@@ -4,6 +4,7 @@ import {
   collectAccelerators,
   findBareSpaceAccelerators,
   isMenuAction,
+  menuStateEquals,
   sanitizeMenuSyncState,
   DEFAULT_MENU_SYNC_STATE
 } from '@shared/menu'
@@ -55,6 +56,43 @@ describe('MenuSyncState sanitization', () => {
       embedding: false
     }
     expect(sanitizeMenuSyncState(input)).toEqual(input)
+  })
+})
+
+describe('menuStateEquals', () => {
+  const base = { ...DEFAULT_MENU_SYNC_STATE }
+
+  it('reports equality for identical snapshots', () => {
+    expect(menuStateEquals(base, { ...base })).toBe(true)
+  })
+
+  it('detects a change in every field so the menu is rebuilt only when needed', () => {
+    const mutations: Partial<MenuSyncState>[] = [
+      { hasFocusedTrack: true },
+      { hasDraft: true },
+      { isDirty: true },
+      { hasLyrics: true },
+      { workerReady: true },
+      { preserveWordTags: true },
+      { sidebarVisible: false },
+      { mode: 'layers' },
+      { mode: 'find' },
+      { editorLayout: 'raw' },
+      { editorLayout: 'preview' },
+      { isPlaying: true },
+      { canPlay: true },
+      { canStop: true },
+      { selectedCount: 2 },
+      { embedding: true }
+    ]
+    for (const mutation of mutations) {
+      expect(menuStateEquals(base, { ...base, ...mutation })).toBe(false)
+    }
+  })
+
+  it('ignores extra untrusted keys after sanitization', () => {
+    const sanitized = sanitizeMenuSyncState({ ...base, injected: 'value' })
+    expect(menuStateEquals(sanitized, base)).toBe(true)
   })
 })
 

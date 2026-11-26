@@ -96,15 +96,33 @@ export interface EvaluateCandidateInput {
 /** Default confidence floor below which a candidate is skipped entirely. */
 export const MIN_USABLE_SCORE = 8
 
+/** Absolute floor: below this a non-local candidate is the wrong song. */
+export const MIN_CONFIDENCE_SCORE = 35
+
+/** Minimum score for a non-local line-synced candidate to be accepted final. */
+export const MIN_ACCEPT_SCORE = 70
+
+/** Duration delta (seconds) permitted for an `ACCEPT_FINAL` remote match. */
+export const STRICT_DURATION_DELTA_SEC = 5
+
+/** Duration delta (seconds) beyond which a non-local candidate is rejected. */
+export const MAX_DURATION_DELTA_SEC = 30
+
 /**
  * Routes one candidate to a `SelectionDecision`.
  *
+ * Enforced confidence gates (non-local providers):
  * - `none` / `instrumental` → `REJECT` (nothing embeddable).
- * - low confidence (non-local) → `CONTINUE` (discard, keep searching).
+ * - `score < MIN_CONFIDENCE_SCORE` → `REJECT` (wrong song / noise).
+ * - `durationDeltaSec > MAX_DURATION_DELTA_SEC` → `REJECT` (different cut).
+ * - `score < MIN_USABLE_SCORE` → `CONTINUE` (discard, keep searching).
  * - `word` → `ACCEPT_FINAL`.
- * - `line` → `KEEP_AS_FALLBACK` when `preferWordSynced` and not a local
- *   sidecar; otherwise `ACCEPT_FINAL`.
+ * - `line` → `ACCEPT_FINAL` only when `score >= MIN_ACCEPT_SCORE` and the
+ *   duration delta is unknown or `<= STRICT_DURATION_DELTA_SEC`; otherwise
+ *   `KEEP_AS_FALLBACK`. `preferWordSynced` downgrades remote `line` to
+ *   `KEEP_AS_FALLBACK` regardless of score.
  * - `plain` → `KEEP_AS_FALLBACK` (used only when nothing better exists).
+ * - Local `.lrc` sidecars stay authoritative (`ACCEPT_FINAL` when synced).
  */
 export function evaluateCandidate(input: EvaluateCandidateInput): CandidateEvaluation {
   const {
@@ -133,18 +151,53 @@ export function evaluateCandidate(input: EvaluateCandidateInput): CandidateEvalu
   }
 
   if (timingKind === 'word') {
+    if (!isLocalSidecar && score < MIN_CONFIDENCE_SCORE) {
+      return {
+        ...base,
+        decision: 'REJECT',
+        reason: `wrong-song confidence score ${score} < ${MIN_CONFIDENCE_SCORE}`
+      }
+    }
     return { ...base, decision: 'ACCEPT_FINAL', reason: 'word-synced lyrics' }
   }
 
   if (timingKind === 'line') {
-    if (preferWordSynced && !isLocalSidecar) {
+    if (isLocalSidecar) {
+      return { ...base, decision: 'ACCEPT_FINAL', reason: 'line-synced local .lrc sidecar' }
+    }
+    if (score < MIN_CONFIDENCE_SCORE) {
+      return {
+        ...base,
+        decision: 'REJECT',
+        reason: `wrong-song confidence score ${score} < ${MIN_CONFIDENCE_SCORE}`
+      }
+    }
+    if (durationDeltaSec !== undefined && durationDeltaSec > MAX_DURATION_DELTA_SEC) {
+      return {
+        ...base,
+        decision: 'REJECT',
+        reason: `duration mismatch ${durationDeltaSec}s > ${MAX_DURATION_DELTA_SEC}s`
+      }
+    }
+    if (preferWordSynced) {
       return {
         ...base,
         decision: 'KEEP_AS_FALLBACK',
         reason: 'line-synced; prefer word-synced result'
       }
     }
-    return { ...base, decision: 'ACCEPT_FINAL', reason: 'line-synced lyrics' }
+    const durationOk =
+      durationDeltaSec === undefined || durationDeltaSec <= STRICT_DURATION_DELTA_SEC
+    if (score >= MIN_ACCEPT_SCORE && durationOk) {
+      return { ...base, decision: 'ACCEPT_FINAL', reason: 'line-synced lyrics' }
+    }
+    return {
+      ...base,
+      decision: 'KEEP_AS_FALLBACK',
+      reason: durationOk
+        ? `line-synced mid-confidence score ${score} < ${MIN_ACCEPT_SCORE}`
+        : `line-synced duration delta ${durationDeltaSec}s > ${STRICT_DURATION_DELTA_SEC}s`
+    }
   }
 
   return { ...base, decision: 'KEEP_AS_FALLBACK', reason: 'plain lyrics only' }

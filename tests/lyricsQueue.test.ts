@@ -67,14 +67,76 @@ describe('LyricsFetchQueue', () => {
   it('picks the best score across providers when localSidecar returns plain only', async () => {
     const low = makeProvider('localSidecar', async () => makeCandidate('localSidecar', 6))
     const high = makeProvider('lrclib', async () =>
-      makeCandidate('lrclib', 15, '[00:01.00]Best')
+      makeCandidate('lrclib', 80, '[00:01.00]Best')
     )
     const queue = new LyricsFetchQueue({ providers: [low, high] })
 
     const result = await queue.fetch(makeQuery('b'.repeat(32)))
     expect(result).not.toBeNull()
     expect(result!.providerId).toBe('lrclib')
-    expect(result!.score).toBe(15)
+    expect(result!.score).toBe(80)
+  })
+
+  it('rejects low-confidence remote candidates that are the wrong song', async () => {
+    const onProgress = vi.fn()
+    const queue = new LyricsFetchQueue({
+      providers: [makeProvider('lrclib', async () => makeCandidate('lrclib', 20, '[00:01.00]Nope'))],
+      onProgress
+    })
+
+    const result = await queue.fetch(makeQuery('c'.repeat(32)))
+    // Score 20 < MIN_CONFIDENCE_SCORE(35): the router rejects it, so the track
+    // reports "done" with no candidate instead of silently taking wrong lyrics.
+    expect(result).toBeNull()
+    expect(onProgress.mock.calls.at(-1)?.[0]?.phase).toBe('done')
+  })
+
+  it('stops at a high-confidence remote match without consulting later providers', async () => {
+    const calls: string[] = []
+    const fallback = makeProvider('localSidecar', async () => {
+      calls.push('local')
+      return makeCandidate('localSidecar', 100, '[00:01.00]Local')
+    })
+    const queue = new LyricsFetchQueue({
+      providers: [
+        makeProvider('lrclib', async () => makeCandidate('lrclib', 95, '[00:01.00]Far')),
+        fallback
+      ]
+    })
+
+    const result = await queue.fetch(makeQuery('d'.repeat(32)))
+    // score 95 line-synced with no duration delta is ACCEPT_FINAL, so the
+    // later provider must never run.
+    expect(result!.providerId).toBe('lrclib')
+    expect(calls).toEqual([])
+  })
+
+  it('defaults preferWordSynced to false (line-synced LRC is the product default)', async () => {
+    const remoteFetch = vi.fn(async () => makeCandidate('lrclib', 80, '[00:01.00]Line'))
+    const queue = new LyricsFetchQueue({
+      providers: [makeProvider('lrclib', remoteFetch)]
+    })
+
+    const result = await queue.fetch(makeQuery('a'.repeat(32)))
+    expect(result!.timingKind).toBe('line')
+    expect(result!.syncedLyrics).toBe('[00:01.00]Line')
+    expect(remoteFetch).toHaveBeenCalledOnce()
+  })
+
+  it('still prefers word-synced results when preferWordSynced is explicitly true', async () => {
+    const lineFetch = vi.fn(async () => makeCandidate('lrclib', 80, '[00:01.00]Line'))
+    const wordFetch = vi.fn(async () =>
+      makeCandidate('lrclib', 85, '[00:01.00]<00:01.00>W<00:01.50>ord')
+    )
+    const queue = new LyricsFetchQueue({
+      providers: [makeProvider('lrclib', lineFetch), makeProvider('lrclib', wordFetch)],
+      preferWordSynced: true
+    })
+
+    const result = await queue.fetch(makeQuery('a'.repeat(32)))
+    expect(lineFetch).toHaveBeenCalledOnce()
+    expect(wordFetch).toHaveBeenCalledOnce()
+    expect(result!.timingKind).toBe('word')
   })
 
   it('short-circuits remaining providers when localSidecar finds synced lyrics', async () => {
@@ -98,7 +160,7 @@ describe('LyricsFetchQueue', () => {
     })
     const remote = makeProvider('lrclib', async () => {
       calls.push('lrclib')
-      return makeCandidate('lrclib', 15, '[00:01.00]Remote')
+      return makeCandidate('lrclib', 80, '[00:01.00]Remote')
     })
     const queue = new LyricsFetchQueue({ providers: [local, remote] })
 
@@ -186,7 +248,7 @@ describe('LyricsFetchQueue', () => {
     let attempt = 0
     const provider = makeProvider('lrclib', async () => {
       attempt++
-      return makeCandidate('lrclib', 10, `[00:01.00]Attempt ${attempt}`)
+      return makeCandidate('lrclib', 80, `[00:01.00]Attempt ${attempt}`)
     })
     const gate = deferred()
     const blockingProvider = makeProvider('localSidecar', async () => {
@@ -298,7 +360,7 @@ describe('LyricsFetchQueue', () => {
   })
 
   it('retains line-synced remote fallback and continues searching for word-synced', async () => {
-    const lineFetch = vi.fn(async () => makeCandidate('lrclib', 60, '[00:01.00]Line'))
+    const lineFetch = vi.fn(async () => makeCandidate('lrclib', 80, '[00:01.00]Line'))
     const wordFetch = vi.fn(async () =>
       makeCandidate('localSidecar', 70, '[00:01.00]<00:01.00>W<00:01.50>ord')
     )
