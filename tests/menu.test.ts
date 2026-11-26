@@ -146,6 +146,32 @@ describe('Menu template structure', () => {
     ).toBe(false)
   })
 
+  it('File exposes Settings… on Ctrl+,', () => {
+    const template = buildMenuTemplate(state)
+    const file = template.find((item) => item.label === 'File')!
+    const settings = file.submenu!.find((item) => item.action === 'open-settings')
+    expect(settings?.label).toBe('Settings…')
+    expect(settings?.accelerator).toBe('Ctrl+,')
+    expect(settings?.enabled).not.toBe(false)
+  })
+
+  it('Edit exposes opt-in AI translation/romanization actions', () => {
+    const template = buildMenuTemplate(state)
+    const edit = template.find((item) => item.label === 'Edit')!
+    const translate = edit.submenu!.find((item) => item.action === 'ai-translate')
+    const romanize = edit.submenu!.find((item) => item.action === 'ai-romanize')
+    expect(translate?.label).toMatch(/AI Translate/)
+    expect(romanize?.label).toMatch(/AI Romanize/)
+    // Both are gated on the focused track having lyrics text.
+    expect(translate?.enabled).toBe(true)
+
+    const noLyrics = buildMenuTemplate({ ...state, hasLyrics: false })
+    const editNoLyrics = noLyrics.find((item) => item.label === 'Edit')!
+    expect(editNoLyrics.submenu!.find((item) => item.action === 'ai-translate')?.enabled).toBe(
+      false
+    )
+  })
+
   it('File offers Revert to Embedded File, enabled only with a focused track and a draft', () => {
     const withDraft = buildMenuTemplate({ ...state, hasDraft: true })
     const file = withDraft.find((item) => item.label === 'File')!

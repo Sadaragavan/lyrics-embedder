@@ -222,6 +222,9 @@ export function buildMenuTemplate(state: MenuSyncState): MenuTemplateItem[] {
           enabled: hasTrack && state.workerReady && !state.embedding
         }),
         { type: 'separator' },
+        // AI provider settings (OpenAI-compatible base URL, model, secret key).
+        actionable('Settings…', 'open-settings', { accelerator: 'Ctrl+,' }),
+        { type: 'separator' },
         { label: 'Exit', role: 'quit' }
       ]
     },
@@ -252,6 +255,14 @@ export function buildMenuTemplate(state: MenuSyncState): MenuTemplateItem[] {
           enabled: hasText
         }),
         actionable('Send Primary to Romanization', 'send-primary-to-romanization', {
+          enabled: hasText
+        }),
+        { type: 'separator' },
+        // Opt-in AI layers: they never touch the primary LRC.
+        actionable('AI Translate to Translation Layer', 'ai-translate', {
+          enabled: hasText
+        }),
+        actionable('AI Romanize to Romanization Layer', 'ai-romanize', {
           enabled: hasText
         })
       ]

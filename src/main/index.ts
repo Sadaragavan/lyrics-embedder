@@ -7,6 +7,7 @@ import {
   dialog,
   ipcMain,
   protocol,
+  safeStorage,
   utilityProcess,
   type UtilityProcess
 } from 'electron'
@@ -16,6 +17,10 @@ import {
   ALLOWED_PROVIDER_IDS,
   isWorkerProgressMessage,
   type AddLibraryRootRequest,
+  type AiGenerateRequest,
+  type AiGenerateResult,
+  type AiProviderPreset,
+  type AiProviderSettingsInput,
   type EmbedLyricsRequest,
   type EmbedLyricsResult,
   type LibraryRoot,
@@ -51,9 +56,13 @@ import { disposeApplicationMenu, setupApplicationMenu, updateMenuState } from '.
 import { isPathWithinRoots } from './utils/pathContainment'
 import { isValidTrackId, normalizePathKey, resolveRealPath } from './utils/trackId'
 import { scoreCandidate } from '@shared/trackMatching'
+import { validateAiBaseUrl } from '@shared/aiTranslate'
 import { resolveTaglibWasmPath } from './wasmPath'
 import { createLyricsFetchQueue, type LyricsFetchQueue } from './providers/queue'
 import { LrclibProvider } from './providers/lrclib'
+import { NeteaseProvider } from './providers/netease'
+import { createAiTranslator, type AiTranslator } from './providers/aiTranslator'
+import { createSettingsStore, type SecretCipher, type SettingsStore } from './settingsStore'
 import {
   createLocalSidecarProvider,
   getSidecarPath,
@@ -92,7 +101,12 @@ const activeTargetDirs = new Map<string, number>()
 let store: JsonStore | null = null
 let lyricsFetchQueue: LyricsFetchQueue | null = null
 let lrclibProvider: LrclibProvider | null = null
+let neteaseProvider: NeteaseProvider | null = null
 let localSidecarProvider: LyricsProvider | null = null
+let settingsStore: SettingsStore | null = null
+let aiTranslator: AiTranslator | null = null
+/** In-flight AI generation jobs, keyed by `jobId`, for cancellation. */
+const activeAiJobs = new Map<string, AbortController>()
 // Tracks `.lrc` file real paths explicitly chosen by the user via native open dialog.
 const authorizedDialogLrcPaths = new Set<string>()
 
@@ -414,6 +428,99 @@ function validateSaveDraft(payload: unknown): SaveDraftRequest {
   }
 }
 
+const AI_PRESETS: readonly AiProviderPreset[] = [
+  'openai',
+  'gemini',
+  'openrouter',
+  'ollama',
+  'custom'
+]
+const MAX_AI_MODEL_CHARS = 200
+const MAX_AI_LANGUAGE_CHARS = 80
+
+/** Validates a renderer settings write (URL safety + field lengths). */
+function validateAiSettingsInput(payload: unknown): AiProviderSettingsInput {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Invalid AI settings payload')
+  }
+  const c = payload as Record<string, unknown>
+
+  if (typeof c.preset !== 'string' || !(AI_PRESETS as readonly string[]).includes(c.preset)) {
+    throw new Error(`Invalid AI preset: ${String(c.preset)}`)
+  }
+  if (typeof c.baseUrl !== 'string') {
+    throw new Error('AI settings must include a baseUrl string')
+  }
+  const urlCheck = validateAiBaseUrl(c.baseUrl)
+  if (!urlCheck.ok) {
+    throw new Error(urlCheck.error)
+  }
+  if (typeof c.model !== 'string' || c.model.trim().length === 0) {
+    throw new Error('AI settings must include a model')
+  }
+  if (c.model.length > MAX_AI_MODEL_CHARS) {
+    throw new Error(`AI model must be <= ${MAX_AI_MODEL_CHARS} characters`)
+  }
+  for (const key of ['targetLanguage', 'romanizationStyle'] as const) {
+    const value = c[key]
+    if (value !== undefined && (typeof value !== 'string' || value.length > MAX_AI_LANGUAGE_CHARS)) {
+      throw new Error(`${key} must be a string <= ${MAX_AI_LANGUAGE_CHARS} characters`)
+    }
+  }
+  if (c.apiKey !== undefined && typeof c.apiKey !== 'string') {
+    throw new Error('apiKey must be a string when provided')
+  }
+
+  return {
+    preset: c.preset as AiProviderPreset,
+    baseUrl: urlCheck.url,
+    model: c.model.trim(),
+    targetLanguage: (c.targetLanguage as string | undefined) ?? 'English',
+    romanizationStyle:
+      (c.romanizationStyle as string | undefined) ?? 'Hepburn-style Romaji',
+    ...(typeof c.apiKey === 'string' ? { apiKey: c.apiKey } : {})
+  }
+}
+
+/** Validates an AI generation request before any network call is made. */
+function validateAiGenerateRequest(
+  payload: unknown
+): { request: AiGenerateRequest; realFilePath: string } {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Invalid AI generate payload')
+  }
+  const c = payload as Record<string, unknown>
+
+  if (typeof c.jobId !== 'string' || c.jobId.length === 0 || c.jobId.length > 128) {
+    throw new Error('AI generate payload must include a jobId')
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(c.jobId)) {
+    throw new Error('Invalid jobId format')
+  }
+  if (typeof c.trackId !== 'string' || !isValidTrackId(c.trackId)) {
+    throw new Error('AI generate payload must include a valid trackId')
+  }
+  if (c.mode !== 'translation' && c.mode !== 'romanization') {
+    throw new Error("AI generate mode must be 'translation' or 'romanization'")
+  }
+  if (typeof c.lyrics !== 'string') {
+    throw new Error('AI generate payload must include lyrics text')
+  }
+  if (Buffer.byteLength(c.lyrics, 'utf8') > MAX_LYRICS_BYTES) {
+    throw new Error('Lyrics payload exceeds 1 MiB limit')
+  }
+
+  return {
+    request: {
+      jobId: c.jobId,
+      trackId: c.trackId,
+      mode: c.mode,
+      lyrics: c.lyrics
+    },
+    realFilePath: ''
+  }
+}
+
 function validateLyricsFetchRequest(payload: unknown): LyricsFetchRequest {
   if (!payload || typeof payload !== 'object') {
     throw new Error('Invalid lyrics fetch request')
@@ -493,7 +600,8 @@ function validateLyricsSearchRequest(payload: unknown): LyricsSearchRequest {
     filePath: base.filePath,
     ...(searchTitle === undefined ? {} : { searchTitle }),
     ...(searchArtist === undefined ? {} : { searchArtist }),
-    ...(searchAlbum === undefined ? {} : { searchAlbum })
+    ...(searchAlbum === undefined ? {} : { searchAlbum }),
+    ...(base.providerIds ? { providerIds: base.providerIds } : {})
   }
 }
 
@@ -963,6 +1071,105 @@ function registerIpcHandlers(): void {
     }
   )
 
+  // --- Pass B: AI settings + opt-in AI translation/romanization ---
+
+  ipcMain.handle(IPC_CHANNELS.getAiSettings, async () => {
+    if (!settingsStore) throw new Error('Settings store not initialized')
+    return settingsStore.getPublicSettings()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.saveAiSettings, async (_event, rawPayload: unknown) => {
+    if (!settingsStore) throw new Error('Settings store not initialized')
+    const input = validateAiSettingsInput(rawPayload)
+    return settingsStore.saveSettings(input)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.clearAiKey, async () => {
+    if (!settingsStore) throw new Error('Settings store not initialized')
+    return settingsStore.clearApiKey()
+  })
+
+  ipcMain.handle(
+    IPC_CHANNELS.lyricsAiCancel,
+    async (_event, rawJobId: unknown): Promise<void> => {
+      if (typeof rawJobId !== 'string' || rawJobId.length === 0 || rawJobId.length > 128) {
+        throw new Error('Invalid jobId for cancel')
+      }
+      const controller = activeAiJobs.get(rawJobId)
+      if (controller) {
+        controller.abort()
+        activeAiJobs.delete(rawJobId)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.lyricsAiGenerate,
+    async (_event, rawPayload: unknown): Promise<AiGenerateResult> => {
+      if (!settingsStore || !aiTranslator) {
+        throw new Error('AI translator not initialized')
+      }
+      const { request } = validateAiGenerateRequest(rawPayload)
+
+      const settings = await settingsStore.getPublicSettings()
+      if (!settings.encryptionAvailable && !settings.hasApiKey) {
+        // Local Ollama needs no key, so only a remote preset without a key blocks.
+        const isLoopback = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(settings.baseUrl)
+        if (!isLoopback) {
+          throw new Error(
+            'No API key saved and secure storage is unavailable. Open Settings to configure AI.'
+          )
+        }
+      }
+
+      const apiKey = await settingsStore.getApiKey()
+      const controller = new AbortController()
+      activeAiJobs.set(request.jobId, controller)
+      sendToRenderer(IPC_CHANNELS.lyricsAiProgress, {
+        jobId: request.jobId,
+        trackId: request.trackId,
+        phase: 'running'
+      })
+
+      try {
+        const outcome = await aiTranslator.generate({
+          jobId: request.jobId,
+          trackId: request.trackId,
+          mode: request.mode,
+          lyrics: request.lyrics,
+          settings,
+          apiKey,
+          signal: controller.signal
+        })
+        sendToRenderer(IPC_CHANNELS.lyricsAiProgress, {
+          jobId: request.jobId,
+          trackId: request.trackId,
+          phase: 'done'
+        })
+        return {
+          jobId: request.jobId,
+          trackId: request.trackId,
+          mode: request.mode,
+          lyrics: outcome.lyrics,
+          lineCount: outcome.lineCount,
+          ...(outcome.model ? { model: outcome.model } : {})
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const aborted = controller.signal.aborted
+        sendToRenderer(IPC_CHANNELS.lyricsAiProgress, {
+          jobId: request.jobId,
+          trackId: request.trackId,
+          phase: aborted ? 'cancelled' : 'error',
+          ...(aborted ? {} : { error: message })
+        })
+        throw error
+      } finally {
+        activeAiJobs.delete(request.jobId)
+      }
+    }
+  )
+
   ipcMain.handle(
     IPC_CHANNELS.lyricsSearchCandidates,
     async (_event, rawPayload: unknown): Promise<LyricsSearchResult[]> => {
@@ -970,11 +1177,15 @@ function registerIpcHandlers(): void {
         throw new Error('LRCLIB provider not initialized')
       }
       const request = await prepareAuthorizedLyricsSearch(rawPayload)
+      const wanted = request.providerIds ? new Set(request.providerIds) : null
+      const isWanted = (id: LyricsProviderId): boolean => wanted === null || wanted.has(id)
+
+      const results: LyricsSearchResult[] = []
+      const failures: string[] = []
 
       // A sibling `.lrc` next to the file always wins: prepend it so the sifter
-      // lists the exact-file sidecar ahead of remote LRCLIB matches.
-      const results: LyricsSearchResult[] = []
-      if (localSidecarProvider) {
+      // lists the exact-file sidecar ahead of remote matches.
+      if (localSidecarProvider && isWanted('localSidecar')) {
         try {
           const localCandidate = await localSidecarProvider.fetch({
             trackId: request.trackId,
@@ -1015,12 +1226,32 @@ function registerIpcHandlers(): void {
             })
           }
         } catch (error) {
+          // Partial results beat a hard failure: record and keep going.
+          failures.push(error instanceof Error ? error.message : String(error))
           console.error('[lyrics] local sidecar candidate lookup failed:', error)
         }
       }
 
-      const remote = await lrclibProvider.searchAllCandidates(request)
-      return [...results, ...remote]
+      // Remote providers run sequentially (each keeps its own concurrency = 1
+      // queue + pacing). A single provider failing must not blank the sifter.
+      const remoteProviders: LyricsProvider[] = []
+      if (isWanted('lrclib') && lrclibProvider) remoteProviders.push(lrclibProvider)
+      if (isWanted('netease') && neteaseProvider) remoteProviders.push(neteaseProvider)
+
+      for (const provider of remoteProviders) {
+        try {
+          const providerResults = await provider.searchAllCandidates?.(request)
+          if (providerResults) results.push(...providerResults)
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : String(error))
+          console.error(`[lyrics] ${provider.id} candidate search failed:`, error)
+        }
+      }
+
+      if (results.length === 0 && failures.length > 0) {
+        throw new Error(failures.join(' | '))
+      }
+      return results
     }
   )
 }
@@ -1064,21 +1295,104 @@ async function createMainWindow(): Promise<void> {
   }
 }
 
+/**
+ * Adapts Electron's *async* `safeStorage` (Electron 45) to the settings store's
+ * `SecretCipher` contract.
+ *
+ * On Linux, a `basic_text` backend means the "encryption" is a hardcoded key —
+ * effectively plaintext — so it is treated as unavailable and the UI tells the
+ * user the key cannot be stored. The deprecated synchronous
+ * `encryptString`/`decryptString` APIs are deliberately avoided; Electron 45
+ * only exposes async variants in the main process.
+ */
+function createSafeStorageCipher(): SecretCipher {
+  let available: boolean | null = null
+
+  const probe = async (): Promise<{ ok: boolean; backend?: string }> => {
+    try {
+      const ok = await safeStorage.isAsyncEncryptionAvailable()
+      if (!ok) return { ok: false }
+      if (process.platform === 'linux') {
+        const backend = safeStorage.getSelectedStorageBackend()
+        // `basic_text` is obfuscation, not encryption. Never report it as secure.
+        if (backend === 'basic_text') {
+          console.warn('[settings] safeStorage backend is basic_text; API key storage disabled')
+          return { ok: false, backend }
+        }
+        return { ok: true, backend }
+      }
+      return { ok: true }
+    } catch (error) {
+      console.error('[settings] safeStorage availability probe failed:', error)
+      return { ok: false }
+    }
+  }
+
+  return {
+    isAvailable(): boolean {
+      // Synchronous view for `getPublicSettings()`: the first real answer wins.
+      if (available === null) return false
+      return available
+    },
+    /** Warms the availability cache without touching a real secret. */
+    async encryptProbe(): Promise<boolean> {
+      const status = await probe()
+      available = status.ok
+      return status.ok
+    },
+    async encrypt(plaintext: string): Promise<string> {
+      const status = await probe()
+      available = status.ok
+      if (!status.ok) {
+        throw new Error('Secure storage is unavailable; cannot encrypt the API key')
+      }
+      const encrypted = await safeStorage.encryptStringAsync(plaintext)
+      return Buffer.from(encrypted).toString('base64')
+    },
+    async decrypt(ciphertext: string): Promise<{ value: string; shouldReEncrypt?: boolean }> {
+      const status = await probe()
+      available = status.ok
+      if (!status.ok) {
+        throw new Error('Secure storage is unavailable; cannot decrypt the API key')
+      }
+      const buffer = Buffer.from(ciphertext, 'base64')
+      const decrypted = await safeStorage.decryptStringAsync(buffer)
+      // Electron reports a rotated/new key; the caller re-encrypts and rewrites.
+      return { value: decrypted.result, shouldReEncrypt: decrypted.shouldReEncrypt }
+    }
+  }
+}
+
 async function initializePersistence(): Promise<void> {
-  store = createStore(app.getPath('userData'))
+  const userData = app.getPath('userData')
+  store = createStore(userData)
   const removed = await store.initialize()
   if (removed.length > 0) {
     console.log(`[store] removed ${removed.length} stale staging file(s) on startup`)
+  }
+
+  const cipher = createSafeStorageCipher()
+  // Probe once up front so the first `getPublicSettings()` already reports
+  // `encryptionAvailable` correctly, and so `isAvailable()` is meaningful for
+  // the synchronous save path.
+  settingsStore = createSettingsStore(userData, { cipher })
+  try {
+    await cipher.encryptProbe?.()
+  } catch (error) {
+    console.warn('[settings] secure storage unavailable:', error)
   }
 }
 
 function initializeLyricsFetchQueue(): void {
   lrclibProvider = new LrclibProvider()
+  neteaseProvider = new NeteaseProvider()
   localSidecarProvider = createLocalSidecarProvider()
+  aiTranslator = createAiTranslator()
   lyricsFetchQueue = createLyricsFetchQueue({
     providers: [
       localSidecarProvider!,
-      lrclibProvider
+      lrclibProvider,
+      neteaseProvider
     ],
     onProgress: (progress) => {
       sendToRenderer(IPC_CHANNELS.lyricsFetchProgress, progress)
@@ -1152,6 +1466,11 @@ app.on('before-quit', () => {
   isQuitting = true
   disposeApplicationMenu()
   lyricsFetchQueue?.dispose()
+  // Abort any in-flight AI generation so the HTTP request cannot outlive the app.
+  for (const controller of activeAiJobs.values()) {
+    controller.abort()
+  }
+  activeAiJobs.clear()
   for (const [, resolve] of pendingUnloads) {
     resolve()
   }

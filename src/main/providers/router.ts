@@ -11,11 +11,12 @@ import type {
   LyricsProviderId,
   LyricsTimingKind,
   ProviderErrorKind,
+  ProviderSourceId,
   SelectionDecision
 } from '@shared/types'
 
 export interface ProviderErrorOptions {
-  providerId: LyricsProviderId
+  providerId: ProviderSourceId
   retryAfterMs?: number
   cause?: unknown
 }
@@ -23,7 +24,7 @@ export interface ProviderErrorOptions {
 /** Typed provider failure carrying a normalized `ProviderErrorKind`. */
 export class ProviderError extends Error {
   readonly kind: ProviderErrorKind
-  readonly providerId: LyricsProviderId
+  readonly providerId: ProviderSourceId
   readonly retryAfterMs?: number
 
   constructor(kind: ProviderErrorKind, message: string, options: ProviderErrorOptions) {
@@ -55,7 +56,7 @@ const ABORT_RE = /abort|cancel/i
  */
 export function classifyProviderError(
   error: unknown,
-  providerId: LyricsProviderId = 'lrclib'
+  providerId: ProviderSourceId = 'lrclib'
 ): ProviderError {
   if (error instanceof ProviderError) return error
 

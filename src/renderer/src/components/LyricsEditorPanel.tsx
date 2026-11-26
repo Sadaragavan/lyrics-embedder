@@ -8,6 +8,7 @@ import {
   Plus,
   RotateCcw,
   Search,
+  Settings,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -95,6 +96,30 @@ export interface LyricsEditorPanelProps {
   searchSearched: boolean
   onSearchCandidates: () => void
   onLoadCandidate: (result: LyricsSearchResult) => void
+  /** Loads primary + every bundled layer of a candidate in one action. */
+  onLoadAllLayers: (result: LyricsSearchResult) => void
+  /** Active provider filter (`all` or a concrete provider id). */
+  providerFilter: LyricsProviderFilter
+  onProviderFilterChange: (filter: LyricsProviderFilter) => void
+  /** Opens the AI Settings dialog (gear button in the Find/Layers header). */
+  onOpenSettings: () => void
+  /** Which AI generation (if any) is currently in flight for this track. */
+  aiJob: AiJobState | null
+  /** Starts an AI generation into a secondary layer. */
+  onAiGenerate: (mode: 'translation' | 'romanization') => void
+  /** Cancels the in-flight AI generation. */
+  onAiCancel: () => void
+  /** True when the AI provider has a usable configuration (key or loopback). */
+  aiConfigured: boolean
+}
+
+/** Provider filter for the Find sifter (`all` = no filtering). */
+export type LyricsProviderFilter = 'all' | 'localSidecar' | 'lrclib' | 'netease'
+
+/** In-flight AI generation state surfaced by `App`. */
+export interface AiJobState {
+  mode: 'translation' | 'romanization'
+  jobId: string
 }
 
 interface CandidateSiftingRowProps {
@@ -105,7 +130,19 @@ interface CandidateSiftingRowProps {
 }
 
 function providerLabel(providerId: LyricsSearchResult['providerId']): string {
-  return providerId === 'lrclib' ? 'LRCLIB' : 'Local .lrc'
+  if (providerId === 'lrclib') return 'LRCLIB'
+  if (providerId === 'netease') return 'NetEase'
+  return 'Local .lrc'
+}
+
+/** True when the candidate ships a usable same-timestamp translation layer. */
+export function hasTranslationLayer(result: LyricsSearchResult): boolean {
+  return typeof result.translatedLyrics === 'string' && result.translatedLyrics.trim().length > 0
+}
+
+/** True when the candidate ships a usable same-timestamp romanization layer. */
+export function hasRomanizationLayer(result: LyricsSearchResult): boolean {
+  return typeof result.romanizedLyrics === 'string' && result.romanizedLyrics.trim().length > 0
 }
 
 function timingBadge(result: LyricsSearchResult): { label: string; className: string } {
@@ -167,6 +204,22 @@ function CandidateSiftingRow({
           >
             {badge.label}
           </span>
+          {hasTranslationLayer(result) && (
+            <span
+              title="Ships a bundled translation layer"
+              className="shrink-0 rounded border border-sky-800/70 bg-sky-950/60 px-1 py-0.5 text-[9px] font-semibold text-sky-300"
+            >
+              +T
+            </span>
+          )}
+          {hasRomanizationLayer(result) && (
+            <span
+              title="Ships a bundled romanization layer"
+              className="shrink-0 rounded border border-violet-800/70 bg-violet-950/60 px-1 py-0.5 text-[9px] font-semibold text-violet-300"
+            >
+              +R
+            </span>
+          )}
           <span
             title="Duration difference against the focused track"
             className={`ml-auto shrink-0 font-mono text-[10px] tabular-nums ${
@@ -188,6 +241,64 @@ function CandidateSiftingRow({
         </div>
       </button>
     </li>
+  )
+}
+
+/**
+ * Opt-in AI layer action. While its job runs it turns into an inline Cancel so
+ * the user never has to hunt for the abort control.
+ */
+function AiLayerButton({
+  mode,
+  label,
+  aiJob,
+  disabled,
+  aiConfigured,
+  onAiGenerate,
+  onAiCancel,
+  className
+}: {
+  mode: 'translation' | 'romanization'
+  label: string
+  aiJob: AiJobState | null
+  disabled: boolean
+  aiConfigured: boolean
+  onAiGenerate: (mode: 'translation' | 'romanization') => void
+  onAiCancel: () => void
+  className: string
+}): React.JSX.Element {
+  const running = aiJob?.mode === mode
+  const otherRunning = aiJob !== null && !running
+
+  if (running) {
+    return (
+      <button
+        type="button"
+        onClick={onAiCancel}
+        title="Cancel the in-flight AI request"
+        className={`${className} border-amber-700/80 bg-amber-950/60 text-amber-200 hover:bg-amber-900/60`}
+      >
+        <Loader2 className="h-3 w-3 animate-spin" />
+        Cancel
+      </button>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      disabled={disabled || otherRunning}
+      onClick={() => onAiGenerate(mode)}
+      title={
+        aiConfigured
+          ? `${label} with the configured AI provider (writes only the ${mode} layer)`
+          : 'Configure an AI provider first (Settings…)'
+      }
+      className={`${className} disabled:cursor-not-allowed disabled:opacity-40`}
+    >
+      <Sparkles className="h-3 w-3" />
+      {label}
+    </button>
   )
 }
 
@@ -301,7 +412,15 @@ export function LyricsEditorPanel({
   searchError,
   searchSearched,
   onSearchCandidates,
-  onLoadCandidate
+  onLoadCandidate,
+  onLoadAllLayers,
+  providerFilter,
+  onProviderFilterChange,
+  onOpenSettings,
+  aiJob,
+  onAiGenerate,
+  onAiCancel,
+  aiConfigured
 }: LyricsEditorPanelProps) {
   const [offsetInput, setOffsetInput] = useState('')
   const [selectedCandidateKey, setSelectedCandidateKey] = useState<string | null>(null)
@@ -561,15 +680,27 @@ export function LyricsEditorPanel({
   const candidateKey = (result: LyricsSearchResult, index: number): string =>
     `${result.providerId}-${result.sourceId ?? result.sourceRef ?? result.title}-${index}`
 
+  /**
+   * Provider filter is applied client-side: results come from one search pass
+   * so switching pills is instant and never re-queries the network.
+   */
+  const visibleResults = useMemo(
+    () =>
+      providerFilter === 'all'
+        ? searchResults
+        : searchResults.filter((result) => result.providerId === providerFilter),
+    [searchResults, providerFilter]
+  )
+
   const selectedCandidateIndex = (() => {
-    if (searchResults.length === 0) return -1
-    const found = searchResults.findIndex(
+    if (visibleResults.length === 0) return -1
+    const found = visibleResults.findIndex(
       (result, index) => candidateKey(result, index) === selectedCandidateKey
     )
     return found >= 0 ? found : 0
   })()
   const selectedCandidate =
-    selectedCandidateIndex >= 0 ? searchResults[selectedCandidateIndex] : null
+    selectedCandidateIndex >= 0 ? visibleResults[selectedCandidateIndex] : null
   const selectedCandidateLyrics =
     selectedCandidate?.syncedLyrics ?? selectedCandidate?.plainLyrics ?? ''
 
@@ -1022,6 +1153,47 @@ export function LyricsEditorPanel({
                   ⇄ Swap Romanization
                 </button>
                 <div className="my-1 border-t border-zinc-800" />
+                <AiLayerButton
+                  mode="translation"
+                  label="AI Translate → Translation"
+                  aiJob={aiJob}
+                  disabled={!hasSynced}
+                  aiConfigured={aiConfigured}
+                  onAiGenerate={(mode) => {
+                    onAiGenerate(mode)
+                    close()
+                  }}
+                  onAiCancel={onAiCancel}
+                  className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px] font-medium"
+                />
+                <AiLayerButton
+                  mode="romanization"
+                  label="AI Romanize → Romanization"
+                  aiJob={aiJob}
+                  disabled={!hasSynced}
+                  aiConfigured={aiConfigured}
+                  onAiGenerate={(mode) => {
+                    onAiGenerate(mode)
+                    close()
+                  }}
+                  onAiCancel={onAiCancel}
+                  className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px] font-medium"
+                />
+                {!aiConfigured && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpenSettings()
+                      close()
+                    }}
+                    title="Configure an OpenAI-compatible provider for AI layers"
+                    className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px] text-amber-300 hover:bg-zinc-800"
+                  >
+                    <Settings className="h-3 w-3" />
+                    Configure AI provider…
+                  </button>
+                )}
+                <div className="my-1 border-t border-zinc-800" />
                 <button
                   type="button"
                   disabled={!hasDraft}
@@ -1169,20 +1341,51 @@ export function LyricsEditorPanel({
           </div>
 
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-1.5">
-            <span className="text-[11px] text-zinc-500">
+            <span className="min-w-0 flex-1 text-[11px] leading-snug text-zinc-500">
               Layers interleave at matching `[mm:ss.xx]` timestamps; the primary is never
               overwritten until you apply.
             </span>
-            <button
-              type="button"
-              disabled={!stackedOutput}
-              onClick={handleApplyStackedLayers}
-              title="Merge primary + layers into the editor using same-timestamp stacking"
-              className="inline-flex shrink-0 items-center gap-1.5 rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Layers className="h-3 w-3" />
-              Apply Stacked to Primary
-            </button>
+            <div className="flex shrink-0 items-center gap-1">
+              <AiLayerButton
+                mode="translation"
+                label="AI Translate"
+                aiJob={aiJob}
+                disabled={!hasSynced}
+                aiConfigured={aiConfigured}
+                onAiGenerate={onAiGenerate}
+                onAiCancel={onAiCancel}
+                className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-medium"
+              />
+              <AiLayerButton
+                mode="romanization"
+                label="AI Romanize"
+                aiJob={aiJob}
+                disabled={!hasSynced}
+                aiConfigured={aiConfigured}
+                onAiGenerate={onAiGenerate}
+                onAiCancel={onAiCancel}
+                className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-medium"
+              />
+              <button
+                type="button"
+                onClick={onOpenSettings}
+                title="AI provider settings"
+                aria-label="Open AI settings"
+                className="rounded border border-zinc-700 bg-zinc-800 p-1 text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100"
+              >
+                <Settings className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                disabled={!stackedOutput}
+                onClick={handleApplyStackedLayers}
+                title="Merge primary + layers into the editor using same-timestamp stacking"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Layers className="h-3 w-3" />
+                Apply Stacked to Primary
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1228,7 +1431,7 @@ export function LyricsEditorPanel({
               type="button"
               onClick={onSearchCandidates}
               disabled={searchLoading}
-              title="Query the sibling .lrc and LRCLIB (sequential, paced requests with Retry-After handling)"
+              title="Query the sibling .lrc, LRCLIB, and NetEase (sequential, paced requests with Retry-After handling)"
               className="inline-flex shrink-0 items-center gap-1 rounded bg-sky-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {searchLoading ? (
@@ -1238,6 +1441,51 @@ export function LyricsEditorPanel({
               )}
               {searchLoading ? 'Searching...' : 'Search'}
             </button>
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              title="AI provider settings (base URL, model, API key, target language)"
+              aria-label="Open AI settings"
+              className="shrink-0 rounded border border-zinc-700 bg-zinc-800 p-1 text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100"
+            >
+              <Settings className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {/* Provider filter pills */}
+          <div className="flex shrink-0 flex-wrap items-center gap-1">
+            {(
+              [
+                { id: 'all', label: 'All' },
+                { id: 'localSidecar', label: 'Local' },
+                { id: 'lrclib', label: 'LRCLIB' },
+                { id: 'netease', label: 'NetEase' }
+              ] as const
+            ).map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                aria-pressed={providerFilter === entry.id}
+                onClick={() => onProviderFilterChange(entry.id)}
+                title={
+                  entry.id === 'all'
+                    ? 'Search every provider'
+                    : `Search only ${entry.label}`
+                }
+                className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+                  providerFilter === entry.id
+                    ? 'border-emerald-700 bg-emerald-950/60 text-emerald-200'
+                    : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {entry.label}
+              </button>
+            ))}
+            {visibleResults.length !== searchResults.length && (
+              <span className="ml-1 text-[10px] text-zinc-500">
+                {visibleResults.length} of {searchResults.length}
+              </span>
+            )}
           </div>
 
           {!searchLoading && searchError && (
@@ -1252,13 +1500,13 @@ export function LyricsEditorPanel({
               <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-500">
                 <span>Candidates</span>
                 <span className="tabular-nums">
-                  {searchLoading ? 'searching…' : `${searchResults.length}`}
+                  {searchLoading ? 'searching…' : `${visibleResults.length}`}
                 </span>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-                {searchResults.length > 0 ? (
+                {visibleResults.length > 0 ? (
                   <ul className="space-y-1">
-                    {searchResults.map((result, index) => {
+                    {visibleResults.map((result, index) => {
                       const key = candidateKey(result, index)
                       return (
                         <CandidateSiftingRow
@@ -1273,7 +1521,9 @@ export function LyricsEditorPanel({
                   </ul>
                 ) : searchSearched && !searchLoading ? (
                   <p className="p-2 text-[11px] text-zinc-500">
-                    No candidates matched those fields. Adjust the search and try again.
+                    {searchResults.length > 0
+                      ? 'No candidates from this provider. Try the All filter.'
+                      : 'No candidates matched those fields. Adjust the search and try again.'}
                   </p>
                 ) : (
                   <p className="p-2 text-[11px] text-zinc-500">
@@ -1315,6 +1565,20 @@ export function LyricsEditorPanel({
                 >
                   Load Primary
                 </button>
+                {selectedCandidate &&
+                  (hasTranslationLayer(selectedCandidate) ||
+                    hasRomanizationLayer(selectedCandidate)) && (
+                    <button
+                      type="button"
+                      onClick={() => onLoadAllLayers(selectedCandidate)}
+                      title="Load this candidate's primary lyrics plus its bundled translation and romanization layers, then save the draft"
+                      className="rounded border border-sky-700/80 bg-sky-950/60 px-2 py-1 text-[11px] font-medium text-sky-200 hover:bg-sky-900/60 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Load All Layers
+                      {hasTranslationLayer(selectedCandidate) ? ' +T' : ''}
+                      {hasRomanizationLayer(selectedCandidate) ? ' +R' : ''}
+                    </button>
+                  )}
                 <button
                   type="button"
                   disabled={!selectedCandidateLyrics}

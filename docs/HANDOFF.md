@@ -1,34 +1,35 @@
 # Active Handoff
 
-- Updated: 2026-11-26 15:35 IST
+- Updated: 2026-11-26 19:05 IST
 - Last agent: builder
 - Branch: `arena/bae40d43-lyrics-embedder`
-- Base commit: `9b4f114` (local branch point; this clone is shallow — `git rev-parse --is-shallow-repository` → `true` — so only 5 commits are visible. Non-docs HEAD after Pass A: `b021dea`.)
+- Base commit: `213da83` (verified with `git log -n 1 --format=%h -- . ":(exclude)docs/"`). This clone is shallow (`git rev-parse --is-shallow-repository` → `true`); do not assume history was squashed. Pass A is `b021dea`/`b73e9ab` on this branch; the branch was rebased onto the published remote head, so older notes citing `9b4f114`/`96a8164`/`e7f962e`/`ac2044d` refer to pre-rebase SHAs of identical content.
 
 ## Current Goal
-Pass A (UX Cleanup & Unified Live Editor) is implemented and verified on Linux. Remaining: local Windows packaging + `--smoke-test`, interactive desktop walkthrough, Poweramp Android hardware spot-check.
+Pass B (NetEase multi-layer sources + opt-in OpenAI-compatible AI translation/romanization) is implemented and verified on Linux. Remaining: Windows packaging + `--smoke-test`, interactive desktop walkthrough, Poweramp Android hardware spot-check.
 
 ## Completed Since Last Handoff
-1. **Shared model**: new DOM-free `src/shared/lrcEditor.ts` (`parseEditableRows`, `serializeEditableRows`, `serializeEditableLayer`, `parseInlineTimestamp`, `isValidInlineTimestamp`); `LyricDraft`/`SaveDraftRequest` carry optional `translation`/`romanization`; `EditorLayout` is `'live' | 'raw'`; menu drops `save-draft`, renames `discard-draft` to `Revert to Embedded File`, exposes one `layout-live` radio.
-2. **Persistence**: `validateSaveDraft` validates both layers as optional strings and applies the 1 MiB cap to the *combined* UTF-8 bytes; `JsonStore.saveDraft` writes non-empty (trimmed) layers atomically inside `enqueueWrite`; `readDraft` normalizes legacy single-layer drafts to `undefined`.
-3. **Auto-save**: 500 ms debounced write on any primary/translation/romanization edit, with `flushAutoSave` before track switch and before embed; focus restores `draft.lyrics` + both layers so switching never drops layers; subtle `Saving...`/`Draft saved` indicator replaces manual Save Draft.
-4. **No floating overlays**: transient info/success now uses a reserved status slot in the player dock beside the TagLib dot (auto-clears after 4 s); errors render in normal flex flow above `<main>`.
-5. **Unified live editor**: `Edit | Layers | Find` mode bar with a single `Raw Text` toggle; per-row clickable `[mm:ss.xx]` pill (click seeks, double-click edits, validated by `parseInlineTimestamp`), inline primary input, hover `+`/`x`, indented dimmer Translation/Romanization sub-inputs, all matching rows highlighted together, auto-scroll only on timestamp change while focus is outside an input; plain lyrics fall back to a clean editable textarea; header has only `Revert` + `Embed`/`Embed Stacked`; footer keeps the source chip (→ Find) and layer visibility toggles.
-6. **Find**: auto-runs the candidate search when the mode opens; `Load Primary` persists the draft and returns to Edit; single-track Fetch removed (only the sidebar `Fetch Selected` at `selectedCount >= 2`).
-7. **Tests**: new `tests/lrcEditor.test.ts` (15 cases), multi-layer + legacy-draft cases in `tests/store.test.ts`, updated `tests/menu.test.ts`.
+1. **NetEase provider** (`src/main/providers/netease.ts`): `id: 'netease'`, `concurrency = 1` queue, >= 500 ms end-to-start pacing recorded in `finally`, `AbortSignal`, bounded 429/503 backoff with `Retry-After`, typed `ProviderError`s. Queries `/api/search/get/web` then `/api/song/lyric` with `Referer: https://music.163.com/` + browser `User-Agent`; extracts `lrc.lyric` / `tlyric.lyric` / `romalrc.lyric`, scores with `scoreCandidate` + `detectLyricsTimingKind`, routes through `evaluateCandidate`. `searchAllCandidates` caps lyric fetches to the top 5 metadata-scored songs.
+2. **Multi-layer transport**: `LyricsProviderId` is `'lrclib' | 'netease' | 'localSidecar'`; candidates/results carry `translatedLyrics`/`romanizedLyrics`; `LyricsSearchRequest.providerIds` filters the sifter. `lyrics:searchCandidates` runs providers sequentially, tolerates a single-provider failure (partial results still return), and only throws when nothing was collected. Batch fetch now persists bundled layers into the draft.
+3. **Encrypted settings** (`src/main/settingsStore.ts`, Electron-free): atomic `userData/settings.json` behind a `writeQueue`, injected async `SecretCipher`, `0600` file mode, re-encrypt on `shouldReEncrypt`. `getPublicSettings()` returns `hasApiKey` only — the plaintext key never reaches the renderer.
+4. **safeStorage wiring** (`src/main/index.ts`): Electron 45 async API only (`isAsyncEncryptionAvailable` / `encryptStringAsync` / `decryptStringAsync`); Linux `basic_text` is treated as unavailable. Deprecated sync calls are not used. AI jobs are aborted on `before-quit`.
+5. **AI translator** (`src/main/providers/aiTranslator.ts`): `/chat/completions`, `concurrency = 1`, 60 s timeout, per-job `AbortController`, `Authorization: Bearer` only when a key is set, `ProviderError` classification (401/403 → credentials, 429 → rate limit).
+6. **Prompt/parse boundary** (`src/shared/aiTranslate.ts`): `validateAiBaseUrl`, `extractTranslatableLines`, `buildAiLyricsMessages`, `parseAiResponseAndRebuildLrc`. Model output is JSON-keyed by integer index and timestamps are always taken from the source — LLM timestamps are never trusted.
+7. **UI**: `SettingsModal.tsx` (5 presets, Base URL, write-only API key + `Saved securely` + `Clear Key`, model, target language, romanization style) opened via `File > Settings…` / `Ctrl+,` / gear buttons. Find gained provider pills (All/Local/LRCLIB/NetEase), `+T`/`+R` badges, and `Load All Layers`. Layers mode + Actions popover gained `AI Translate` / `AI Romanize` with inline `Cancel`; results land in the secondary layers only and trigger auto-save.
+8. **Docs**: `AGENTS.md` no longer claims the AI client is v2-only; it now records the NetEase + AI invariants.
 
 ## Verification Status (Linux workspace)
 - `npm run typecheck`: PASS (0 errors, node + web)
-- `npm test`: PASS (265 passed, 4 platform-skipped, 269 total, 16 files)
+- `npm test`: PASS (364 passed, 4 platform-skipped, 368 total, 20 files)
 - `npm run build`: PASS
-- NOT run here on purpose: `npm run build:unpack`, `dist:win`, and the packaged `--smoke-test` (Windows-only; no Electron binary in this container).
+- NOT run here on purpose: `npm run build:unpack`, `dist:win`, packaged `--smoke-test` (Windows-only; no Electron binary in this container).
 
 ## Exact Next Step
-1. On Windows after merge/pull: `npm ci` → `npm run build:unpack` → run `Poweramp LRC Embedder.exe --smoke-test`; confirm exit 0, `ready: true`, `2.5.1 (TagLib 2.3.2)`.
-2. `npm run dev` walkthrough at 1366x768: type into the live rows and confirm `Draft saved` appears with no manual save; switch tracks mid-edit and confirm the draft survives; double-click a timestamp pill and enter `00:75.00` (must be rejected); toggle Translation/Romanization and confirm the primary is untouched; confirm `Embed Stacked` writes both layers and `Revert` restores the embedded tags.
-3. Poweramp Android hardware spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, `.wav` + `.lrc`.
+1. On Windows: `npm ci` → `npm run build:unpack` → `.\release\win-unpacked\"Poweramp LRC Embedder.exe" --smoke-test`; confirm exit 0, `ready: true`, `2.5.1 (TagLib 2.3.2)`.
+2. `npm run dev` walkthrough: open `Ctrl+,` and confirm the key saves with a `Saved securely` badge and never reappears in plaintext; point at `http://localhost:11434/v1` with Ollama and confirm AI Translate fills only the Translation column while the primary is untouched; run Find on a J-pop/C-pop track and confirm NetEase `+T`/`+R` badges, provider pills, and `Load All Layers`; confirm `http://` remote URLs are rejected in Settings.
+3. Poweramp Android hardware spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, `.wav` + `.lrc`, including a stacked NetEase translation embed.
 
 ## Constraints / Open Blockers
 - Physical Android device with Poweramp required for the hardware spot-check.
-- No Electron binary/Xvfb here, so the renderer was validated by `tsc`, `vitest`, the Vite production build, and emitted-CSS checks only.
-- Pass A explicitly adds no new lyric providers and no LLM translation clients.
+- No Electron binary/Xvfb here, so the renderer was validated by `tsc`, `vitest`, and the Vite production build only.
+- No live NetEase or chat-endpoint calls were made from this container; both clients are covered by injected-`fetch` unit tests.

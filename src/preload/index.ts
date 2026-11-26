@@ -2,6 +2,9 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import {
   IPC_CHANNELS,
   type AddLibraryRootRequest,
+  type AiGenerateProgress,
+  type AiGenerateRequest,
+  type AiProviderSettingsInput,
   type ElectronApi,
   type EmbedLyricsRequest,
   type LyricsFetchProgress,
@@ -57,6 +60,16 @@ const api: ElectronApi = {
     ipcRenderer.invoke(IPC_CHANNELS.lyricsImportFile, filePath),
   searchLyricsCandidates: (request: LyricsSearchRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.lyricsSearchCandidates, request),
+  getAiSettings: () => ipcRenderer.invoke(IPC_CHANNELS.getAiSettings),
+  saveAiSettings: (settings: AiProviderSettingsInput) =>
+    ipcRenderer.invoke(IPC_CHANNELS.saveAiSettings, settings),
+  clearAiKey: () => ipcRenderer.invoke(IPC_CHANNELS.clearAiKey),
+  aiGenerateLyrics: (request: AiGenerateRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.lyricsAiGenerate, request),
+  aiCancelGenerate: (jobId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.lyricsAiCancel, jobId),
+  onLyricsAiProgress: (listener) =>
+    subscribe<AiGenerateProgress>(IPC_CHANNELS.lyricsAiProgress, listener),
   onScanProgress: (listener) => subscribe(IPC_CHANNELS.scanProgress, listener),
   onScanComplete: (listener) => subscribe(IPC_CHANNELS.scanComplete, listener),
   onUnloadAudio: (listener) => {

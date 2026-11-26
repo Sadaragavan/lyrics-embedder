@@ -31,6 +31,11 @@ export { computeTrackId }
 
 export type RenameOperation = (oldPath: string, newPath: string) => Promise<void>
 
+export interface WriteJsonOptions extends StoreOptions {
+  /** POSIX file mode for the written file (e.g. `0o600` for secrets). */
+  mode?: number
+}
+
 export interface StoreOptions {
   /** Injected for tests; defaults to `fs.rename`. */
   rename?: RenameOperation
@@ -97,7 +102,7 @@ export async function readJson<T>(filePath: string): Promise<T | null> {
 export async function writeJson<T>(
   filePath: string,
   data: T,
-  options: StoreOptions = {}
+  options: WriteJsonOptions = {}
 ): Promise<void> {
   const dir = path.dirname(filePath)
   await fs.mkdir(dir, { recursive: true })
@@ -109,7 +114,16 @@ export async function writeJson<T>(
   const rename = options.rename ?? fs.rename
 
   try {
-    await fs.writeFile(tmpPath, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
+    // A restrictive mode is used for secrets-bearing files (`settings.json`);
+    // the staged temp file inherits it through the rename.
+    if (options.mode === undefined) {
+      await fs.writeFile(tmpPath, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
+    } else {
+      await fs.writeFile(tmpPath, `${JSON.stringify(data, null, 2)}\n`, {
+        encoding: 'utf8',
+        mode: options.mode
+      })
+    }
     await retryOnLockError(() => rename(tmpPath, filePath), options.retryOptions)
   } finally {
     await safeUnlink(tmpPath)

@@ -10,6 +10,8 @@ import {
   X
 } from 'lucide-react'
 import type {
+  AiProviderPreset,
+  AiProviderSettingsPublic,
   EditorLayout,
   LibraryRoot,
   LyricsCandidate,
@@ -24,7 +26,7 @@ import type {
   WorkspaceMode
 } from '@shared/ipc'
 import { normalizeLrc, parseLrc, stackLrcLayers } from '@shared/lrc'
-import { findActiveLineIndices } from '@shared/lyricsSync'
+import { findActiveLineIndices, hasSyncedTimestamps } from '@shared/lyricsSync'
 import {
   applyTrackClick,
   clearSelection,
@@ -38,7 +40,12 @@ import {
 } from '@shared/trackSelection'
 import { AudioPreviewPlayer } from './components/AudioPreviewPlayer'
 import { LibrarySidebar } from './components/LibrarySidebar'
-import { LyricsEditorPanel } from './components/LyricsEditorPanel'
+import {
+  LyricsEditorPanel,
+  type AiJobState,
+  type LyricsProviderFilter
+} from './components/LyricsEditorPanel'
+import { SettingsModal } from './components/SettingsModal'
 import { TrackTable } from './components/TrackTable'
 import type { PlayerCommand, SeekRequest, TrackEmbedStatus } from './types'
 
@@ -46,6 +53,13 @@ import type { PlayerCommand, SeekRequest, TrackEmbedStatus } from './types'
 const AUTO_SAVE_DEBOUNCE_MS = 500
 /** How long transient info/success messages stay in the player dock. */
 const STATUS_MESSAGE_TTL_MS = 4000
+
+/** Human-readable provider name used in status messages. */
+function providerDisplayName(providerId: LyricsSearchResult['providerId']): string {
+  if (providerId === 'lrclib') return 'LRCLIB'
+  if (providerId === 'netease') return 'NetEase'
+  return 'the local .lrc sidecar'
+}
 
 const SIDEBAR_WIDTH_KEY = 'lyrics-embedder:sidebar-width'
 const SIDEBAR_MIN_WIDTH = 280
@@ -115,6 +129,13 @@ export function App() {
   const [searchLoading, setSearchLoading] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [searchSearched, setSearchSearched] = useState(false)
+  const [providerFilter, setProviderFilter] = useState<LyricsProviderFilter>('all')
+
+  // --- Pass B: AI settings + opt-in AI layers ---
+  const [aiSettings, setAiSettings] = useState<AiProviderSettingsPublic | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [aiJob, setAiJob] = useState<AiJobState | null>(null)
+  const aiJobIdRef = useRef<string | null>(null)
 
   const [fetchProgressMap, setFetchProgressMap] = useState<Map<string, LyricsFetchProgress>>(
     () => new Map()
@@ -343,8 +364,19 @@ export function App() {
     async (trackId: string, candidate: LyricsCandidate): Promise<boolean> => {
       const text = candidate.syncedLyrics ?? candidate.plainLyrics
       if (!text) return false
+      // NetEase (and any future multi-layer provider) ships translation and
+      // romanization alongside the primary; persist them with the draft so a
+      // batch fetch does not silently discard the extra layers.
+      const translation = candidate.translatedLyrics ?? ''
+      const romanization = candidate.romanizedLyrics ?? ''
       try {
-        const draft = await window.api.saveDraft({ trackId, lyrics: text, status: 'pending' })
+        const draft = await window.api.saveDraft({
+          trackId,
+          lyrics: text,
+          ...(translation.trim().length > 0 ? { translation } : {}),
+          ...(romanization.trim().length > 0 ? { romanization } : {}),
+          status: 'pending'
+        })
         setDraftTexts((prev) => {
           const next = new Map(prev)
           next.set(trackId, text)
@@ -361,6 +393,17 @@ export function App() {
           return next
         })
         if (trackId === focusedTrackIdRef.current) {
+          if (translation.trim().length > 0) {
+            setSecondaryLayerText(translation)
+            setShowTranslationLayer(true)
+          }
+          if (romanization.trim().length > 0) {
+            setRomanizationLayerText(romanization)
+            setShowRomanizationLayer(true)
+          }
+          if (translation.trim().length > 0 || romanization.trim().length > 0) {
+            setLayerEpoch((prev) => prev + 1)
+          }
           setLastSavedSignature(currentSignatureRef.current)
           setAutoSaveState('saved')
         }
@@ -375,6 +418,20 @@ export function App() {
     },
     []
   )
+
+  // AI generation progress: keeps the UI honest when a job is cancelled or fails
+  // out-of-band (for example after `before-quit` aborts it).
+  useEffect(() => {
+    const unsubscribe = window.api.onLyricsAiProgress((progress) => {
+      if (progress.phase === 'error' && progress.error) {
+        setBannerError(progress.error)
+      }
+      if (progress.phase === 'cancelled') {
+        setStatusMessage('AI generation cancelled.')
+      }
+    })
+    return unsubscribe
+  }, [])
 
   // Initial load + main-process event subscriptions
   useEffect(() => {
@@ -566,7 +623,9 @@ export function App() {
         filePath: focusedTrack.filePath,
         searchTitle: searchTitle.trim(),
         searchArtist: searchArtist.trim(),
-        searchAlbum: searchAlbum.trim()
+        searchAlbum: searchAlbum.trim(),
+        // A concrete pill narrows the request; `all` lets every provider answer.
+        ...(providerFilter === 'all' ? {} : { providerIds: [providerFilter] })
       })
       if (searchNonceRef.current !== nonce) return
       setSearchResults(results)
@@ -578,6 +637,169 @@ export function App() {
         setSearchLoading(false)
         setSearchSearched(true)
       }
+    }
+  }
+
+  /** Loads AI provider settings (never contains the plaintext key). */
+  const loadAiSettings = useCallback(async (): Promise<void> => {
+    try {
+      setAiSettings(await window.api.getAiSettings())
+    } catch (error) {
+      setBannerError(error instanceof Error ? error.message : String(error))
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadAiSettings()
+  }, [loadAiSettings])
+
+  async function handleSaveAiSettings(input: {
+    preset: AiProviderPreset
+    baseUrl: string
+    model: string
+    targetLanguage: string
+    romanizationStyle: string
+    apiKey?: string
+  }): Promise<void> {
+    const next = await window.api.saveAiSettings(input)
+    setAiSettings(next)
+    setStatusMessage('AI settings saved.')
+  }
+
+  async function handleClearAiKey(): Promise<void> {
+    setAiSettings(await window.api.clearAiKey())
+    setStatusMessage('AI API key cleared.')
+  }
+
+  /** True when the AI layer actions can run without further setup. */
+  const aiConfigured = useMemo(() => {
+    if (!aiSettings) return false
+    const isLoopback = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(aiSettings.baseUrl)
+    return aiSettings.hasApiKey || isLoopback
+  }, [aiSettings])
+
+  /**
+   * Runs one opt-in AI generation and writes the result into the requested
+   * secondary layer. The primary LRC is never touched.
+   */
+  async function handleAiGenerate(mode: 'translation' | 'romanization'): Promise<void> {
+    if (!focusedTrack) return
+    if (aiJob) return
+    if (!aiConfigured) {
+      setSettingsOpen(true)
+      setBannerError(
+        'AI layers are not configured yet. Add a base URL, model, and API key (or point at local Ollama) in Settings.'
+      )
+      return
+    }
+    if (!hasSyncedTimestamps(focusedLyricsText)) {
+      setBannerError('AI layers need a primary LRC with [mm:ss.xx] timestamps.')
+      return
+    }
+
+    setBannerError(null)
+    const jobId = `ai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    aiJobIdRef.current = jobId
+    setAiJob({ mode, jobId })
+    setStatusMessage(mode === 'translation' ? 'AI translating…' : 'AI romanizing…')
+
+    try {
+      const result = await window.api.aiGenerateLyrics({
+        jobId,
+        trackId: focusedTrack.id,
+        mode,
+        lyrics: focusedLyricsText
+      })
+      if (aiJobIdRef.current !== jobId) return
+      if (mode === 'translation') {
+        handleSecondaryLayerChange(result.lyrics)
+        setShowTranslationLayer(true)
+      } else {
+        handleRomanizationLayerChange(result.lyrics)
+        setShowRomanizationLayer(true)
+      }
+      // Layer edits bump the auto-save signature, but flush immediately so the
+      // generated layer is durable even if the user switches tracks right away.
+      await flushAutoSave(focusedTrack.id)
+      setStatusMessage(
+        `${mode === 'translation' ? 'Translation' : 'Romanization'} ready (${result.lineCount} lines).`
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/cancel|abort/i.test(message)) {
+        setStatusMessage('AI generation cancelled.')
+      } else {
+        setBannerError(message)
+      }
+    } finally {
+      if (aiJobIdRef.current === jobId) {
+        aiJobIdRef.current = null
+        setAiJob(null)
+      }
+    }
+  }
+
+  async function handleAiCancel(): Promise<void> {
+    const jobId = aiJobIdRef.current
+    if (!jobId) return
+    try {
+      await window.api.aiCancelGenerate(jobId)
+    } catch {
+      // Cancellation is best-effort; the job will settle on its own.
+    }
+  }
+
+  /**
+   * Loads a candidate's primary lyrics *and* every bundled layer (NetEase ships
+   * translation/romanization alongside its LRC) in one action.
+   */
+  async function handleLoadAllLayers(result: LyricsSearchResult): Promise<void> {
+    if (!focusedTrack) return
+    const text = result.syncedLyrics ?? result.plainLyrics
+    if (!text) return
+    setBannerError(null)
+    try {
+      const translation = result.translatedLyrics ?? ''
+      const romanization = result.romanizedLyrics ?? ''
+      const draft = await window.api.saveDraft({
+        trackId: focusedTrack.id,
+        lyrics: text,
+        translation,
+        romanization,
+        status: 'pending'
+      })
+      setDraftTexts((prev) => {
+        const next = new Map(prev)
+        next.set(focusedTrack.id, text)
+        return next
+      })
+      setSecondaryLayerText(translation)
+      setRomanizationLayerText(romanization)
+      setShowTranslationLayer(translation.trim().length > 0)
+      setShowRomanizationLayer(romanization.trim().length > 0)
+      setLayerEpoch((prev) => prev + 1)
+      setDraftTrackIds((prev) => new Set(prev).add(focusedTrack.id))
+      setLayerDraftTrackIds((prev) => new Set(prev).add(focusedTrack.id))
+      setTracks((prev) =>
+        prev.map((track) =>
+          track.id === focusedTrack.id ? { ...track, draftId: draft.id } : track
+        )
+      )
+      setLastSavedSignature(null)
+      setAutoSaveState('saved')
+      const layers = [
+        translation.trim().length > 0 ? 'translation' : null,
+        romanization.trim().length > 0 ? 'romanization' : null
+      ].filter(Boolean)
+      setStatusMessage(
+        layers.length > 0
+          ? `Loaded primary + ${layers.join(' + ')} from ${providerDisplayName(result.providerId)}.`
+          : `Loaded ${providerDisplayName(result.providerId)} lyrics as the primary.`
+      )
+      await persistDraftNow(focusedTrack.id)
+      setWorkspaceMode('edit')
+    } catch (error) {
+      setBannerError(error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -1028,6 +1250,15 @@ export function App() {
       case 'embed-current-track':
         if (focusedTrack && !embedding) await handleEmbedFocused()
         break
+      case 'open-settings':
+        setSettingsOpen(true)
+        break
+      case 'ai-translate':
+        await handleAiGenerate('translation')
+        break
+      case 'ai-romanize':
+        await handleAiGenerate('romanization')
+        break
       case 'normalize-lrc':
         if (focusedTrack) {
           handleLyricsChange(normalizeLrc(focusedLyricsText, { preserveWordTags }))
@@ -1340,6 +1571,14 @@ export function App() {
             searchSearched={searchSearched}
             onSearchCandidates={() => void handleSearchCandidates()}
             onLoadCandidate={(result) => void handleLoadCandidate(result)}
+            onLoadAllLayers={(result) => void handleLoadAllLayers(result)}
+            providerFilter={providerFilter}
+            onProviderFilterChange={setProviderFilter}
+            onOpenSettings={() => setSettingsOpen(true)}
+            aiJob={aiJob}
+            onAiGenerate={(mode) => void handleAiGenerate(mode)}
+            onAiCancel={() => void handleAiCancel()}
+            aiConfigured={aiConfigured}
             secondaryLayerText={secondaryLayerText}
             onSecondaryLayerChange={handleSecondaryLayerChange}
             romanizationLayerText={romanizationLayerText}
@@ -1366,6 +1605,15 @@ export function App() {
           setIsPlaying(nextPlaying)
         }}
         onPlayerError={(message) => setBannerError(message)}
+      />
+
+      {/* AI provider settings (File > Settings… / Ctrl+, / gear in Find + Layers) */}
+      <SettingsModal
+        open={settingsOpen}
+        settings={aiSettings}
+        onClose={() => setSettingsOpen(false)}
+        onSave={handleSaveAiSettings}
+        onClearKey={handleClearAiKey}
       />
     </div>
   )

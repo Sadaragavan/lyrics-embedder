@@ -11,6 +11,7 @@
 ## Planned Module Layout
 - `src/shared/`
   - `ipc.ts`: Typed channel names, request/response payloads, and `ElectronApi` interface.
+  - `types.ts`: `LyricsProviderId` is `'lrclib' | 'netease' | 'localSidecar'`; candidates carry optional `translatedLyrics`/`romanizedLyrics`.
   - `types.ts`: `TrackRecord`, `LyricDraft`, `LyricsCandidate`, `LyricsProvider`, `EmbedResult`.
   - `lrc.ts`: Pure LRC parser/formatter (line-synced normalization, `[offset:±ms]` baking, `[length:]` stripping, opt-in A2 preservation, same-timestamp line stacking).
 - `src/main/`
@@ -20,7 +21,9 @@
   - `tagger.ts`: Pure Node/WASI tag read/write and Windows lock-safe atomic swap logic (imported by `audioWorker.ts` and tested directly by Vitest).
   - `mediaProtocol.ts`: Custom `media://` handler with HTTP 206 Partial Content byte-range support and active stream registry (`Map<filePath, Set<Stream>>`).
   - `store.ts`: Atomic JSON read/write for `library-index.json` and per-track drafts under `app.getPath('userData')`.
-  - `providers/`: Pluggable `LyricsProvider` implementations (`lrclib.ts`, `localSidecar.ts`).
+  - `providers/`: Pluggable `LyricsProvider` implementations (`lrclib.ts`, `netease.ts`, `localSidecar.ts`) plus `aiTranslator.ts` (opt-in OpenAI-compatible secondary-layer generation, single-flight with a 60 s timeout).
+  - `settingsStore.ts`: Electron-free encrypted AI settings (`userData/settings.json`, `0600`, injected async `SecretCipher`). The API key is never returned to the renderer.
+- `src/shared/aiTranslate.ts`: Pure prompt building, response JSON extraction, and deterministic LRC rebuild that re-attaches the original `[mm:ss.xx]` timestamps (model timestamps are never trusted).
 - `src/preload/`
   - `index.ts`: `contextBridge.exposeInMainWorld('api', ...)` implementing `ElectronApi`.
 - `src/renderer/`
