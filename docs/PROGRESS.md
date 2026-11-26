@@ -1,7 +1,7 @@
 # Progress
 
 ## Current Phase
-v1.1 complete (query normalizer, Unicode-aware multi-factor track matcher, and SelectionDecision router wired through the provider queue). Provides NFKC text normalization, title/artist cleanup, query-variant generation, timing-kind detection (`word`/`line`/`plain`/`instrumental`/`none`), typed provider errors, and ACCEPT_FINAL/KEEP_AS_FALLBACK/CONTINUE/REJECT routing. Remaining: interactive desktop walkthrough and Poweramp Android hardware spot-check.
+Stabilization + UI Refinement complete: the Phase 4.5/5 render/IPC/menu rebuild loop is closed, `media://` stream close lifecycle is correct, the dynamic 1366x768 UI has zero permanent top chrome (library controls live in the sidebar header, 48px two-line track cards, persistent sidebar width), and the lyrics editor is a single `editorLayout`-driven surface with a Limusic-style source chip footer, Offset/Actions popovers, full-height layers columns and a two-column Find sifter. v1.1 matching now enforces real confidence gates (REJECT low-score/far-duration, ACCEPT_FINAL only >= 70 with <= 5s delta), defaults `preferWordSynced` to `false`, stops LRCLIB on rate-limit/network, and lists the sibling `.lrc` candidate first. Remaining: Windows packaging + `--smoke-test`, interactive desktop walkthrough, Poweramp Android hardware spot-check.
 
 ## Milestones
 - [x] Phase 0: Clean-slate workspace (`package.json`, `electron.vite.config.ts`, `tsconfig*.json`, `vitest.config.ts`, `electron-builder.yml`, `.gitignore`), dependencies installed (`electron@^45.4.1`, `taglib-wasm@^2.5.1`, Tailwind v4, Vitest, `@tanstack/react-virtual`), `electron-winstaller` install script denied, `taglib-wasi.wasm` verified on disk, multi-agent docs and handoff skill installed.
@@ -13,12 +13,16 @@ v1.1 complete (query normalizer, Unicode-aware multi-factor track matcher, and S
 - [x] Phase 4.5 (UI polish): Collapsible Candidate Sifter (`lyrics:searchCandidates` IPC + `LrclibProvider.searchAllCandidates`, `/api/get` + `/api/search` dedup, paced queue), focus-prefilled search fields with stale-response guards, per-result Load Primary / To Translation / To Romanization, send/swap translation+romanization toolbar, Primary Only / Stacked Preview toggle whose live output feeds both the clickable preview and `AudioPreviewPlayer` (`findActiveLineIndices`), and tooltips across editor/toolbar controls.
 - [x] Phase 5: Native app menu (`src/shared/menu.ts` pure template + `src/main/menu.ts` adapter, `MenuAction`/`MenuSyncState` IPC, no bare Space, Alt+P/Alt+S playback), dynamic workspace (collapsible library sidebar with draggable divider, Edit/Layers/Find mode bar, Raw/Split/Preview editor layout), compact track rows, three-mode editor with lifted translation/romanization layers, bottom-dock player with one-shot `PlayerCommand`. `tests/menu.test.ts` covers sanitization/accelerators/template.
 - [x] v1.1: Query normalizer + multi-factor matcher (`src/shared/trackMatching.ts`: NFKC normalization preserving letters/numbers/marks, `cleanTrackTitle`, `splitArtists`, `buildQueryVariants`, Unicode token similarity, duration tiers, album bonus, local baseline), timing detection (`detectLyricsTimingKind`), SelectionDecision router + typed `ProviderError` (`src/main/providers/router.ts`), LRCLIB variant walking / early `ACCEPT_FINAL` / typed failures, and queue routing (`evaluateCandidate`/`pickBetterCandidate`, `errorKind` on error phase). Tests: `trackMatching.test.ts`, `providerRouter.test.ts`, plus extended `lrc`/`lrclib`/`lyricsQueue`/`localSidecar` tests.
+- [x] Stabilization + UI Refinement: menu-action ref (startup effect runs once), memoized `loadedTrackParsedLines`, `menuStateEquals` no-op guard, `StreamRegistry` resolves on `close`/`error`, zero top chrome with `LibrarySidebar` header + Folders popover + contextual batch bar, 48px two-line virtualized cards safe at 280px, persisted `sidebarWidth` `[280,720]`, full-width scrubber + TagLib dot, `editorLayout` single source of truth (raw/split/preview), plain-text preview fallback, dimmer stacked secondary lines, Offset + Actions popovers, three-column layers, two-column Find sifter, source chip + Translation/Romanization toggles, `LyricsSearchResult.timingKind`, router confidence gates, LRCLIB rate-limit/network break + timestamp sanitization, sidecar-first `lyrics:searchCandidates`.
 - [ ] Phase 4 (Verification): Interactive desktop walkthrough and Poweramp Android hardware spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, and `.wav` + `.lrc`.
 
-## Verification (v1.1 exit gate)
-- `npm run typecheck`: PASS (0 errors)
-- `npm test`: PASS (225/225 tests across 14 files)
+## Verification (Stabilization + UI Refinement, Linux workspace)
+- `npm run typecheck`: PASS (0 errors, node + web)
+- `npm test`: PASS (247 passed, 4 skipped, 15 files)
 - `npm run build`: PASS
+- `npm run build:unpack` / `--smoke-test`: NOT run (Windows-only; deferred to the next Windows session — see `docs/HANDOFF.md`)
+
+## Verification (v1.1 exit gate, prior Windows session)
 - `npm run build:unpack`: PASS
 - Packaged `--smoke-test`: PASS (`ready: true`, `2.5.1 (TagLib 2.3.2)`)
 
@@ -26,4 +30,6 @@ v1.1 complete (query normalizer, Unicode-aware multi-factor track matcher, and S
 - `taglib-wasm@2.5.1` ships `dist/taglib-wasi.wasm` and `dist/taglib-web.wasm`, but `package.json` `exports` does not expose `./dist/taglib-wasi.wasm`. Dev mode must resolve `taglib-wasm` root via `fileURLToPath(import.meta.resolve('taglib-wasm'))` and join `'taglib-wasi.wasm'`.
 - `npm install-scripts deny electron-winstaller` is active; do not approve it unless Squirrel.Windows builds are ever introduced.
 - In `taglib-wasm@2.5.1` WASI mode, `audioFile.properties()` strips `"lyrics"` (`"LYRICS"`) while still returning custom `"LYRICS:*"` keys (such as MP3 `USLT` frames with custom descriptions), whereas `audioFile.getLyrics()` only reads the bare `"LYRICS"` property. Reading must check both `getLyrics()` and `LYRICS:*` keys in `properties()`, and writing must strip all `LYRICS` / `LYRICS:*` keys before calling `setProperty('LYRICS', ...)` to avoid duplicate `USLT` frames.
+- Node's `Readable` emits `'end'` when the readable side is consumed but `'close'`/`'error'` only when the descriptor is released; `StreamRegistry` must await `'close'` before an embed swap, otherwise Windows can still hold the file handle.
+- Passing `{ ...defaults }`/template literals into a memoized `useEffect` dependency created a loop: the startup effect depended on `handleMenuAction`, which was re-created each render, so IPC subscriptions (and the resulting `syncMenuState` -> `updateMenuState` -> `rebuildMenu`) re-ran at render frequency. The ref indirection plus `menuStateEquals` fix both halves.
 - `electron-vite` `?modulePath` + `utilityProcess.fork` inside `app.asar` initializes `TagLib.initialize({ wasmUrl, forceWasmType: 'wasi' })` cleanly on Windows against `app.asar.unpacked` (`Poweramp LRC Embedder.exe --smoke-test` verified `ready: true`, `TagLib 2.3.2`).

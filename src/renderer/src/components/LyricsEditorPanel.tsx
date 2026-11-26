@@ -825,8 +825,14 @@ export function LyricsEditorPanel({
                   label: 'Primary',
                   value: lyricsText,
                   onChange: onLyricsChange,
-                  onSwap: null,
-                  onClear: null
+                  // Swapping the primary column swaps it with the layer that has
+                  // content (translation first, then romanization).
+                  onSwap: hasTranslation
+                    ? handleSwapTranslation
+                    : hasRomanization
+                      ? handleSwapRomanization
+                      : null,
+                  onClear: () => onLyricsChange('')
                 },
                 {
                   key: 'translation',
