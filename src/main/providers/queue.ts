@@ -7,20 +7,30 @@
  * cancellation of pending or in-flight requests.
  */
 
+import { detectLyricsTimingKind } from '@shared/lrc'
 import type {
+  CandidateEvaluation,
   LyricsCandidate,
   LyricsFetchPhase,
   LyricsFetchProgress,
   LyricsProvider,
   LyricsProviderId,
-  LyricsQuery
+  LyricsQuery,
+  ProviderErrorKind
 } from '@shared/types'
+import { classifyProviderError, evaluateCandidate, pickBetterCandidate } from './router'
 
 export type ProgressListener = (progress: LyricsFetchProgress) => void
 
 export interface LyricsFetchQueueOptions {
   providers: LyricsProvider[]
   onProgress?: ProgressListener
+  /**
+   * When true (default), line-synced remote results are retained only as
+   * fallbacks while word-synced results are preferred. Local sidecars remain
+   * authoritative and are accepted immediately.
+   */
+  preferWordSynced?: boolean
 }
 
 interface QueueEntry {
@@ -35,6 +45,7 @@ export class LyricsFetchQueue {
   private readonly providers: LyricsProvider[]
   private readonly providerMap: Map<LyricsProviderId, LyricsProvider>
   private readonly onProgress: ProgressListener | undefined
+  private readonly preferWordSynced: boolean
   private readonly queue: QueueEntry[] = []
   private activeEntry: QueueEntry | null = null
   private processing = false
@@ -44,6 +55,7 @@ export class LyricsFetchQueue {
     this.providers = [...options.providers]
     this.providerMap = new Map(this.providers.map((provider) => [provider.id, provider]))
     this.onProgress = options.onProgress
+    this.preferWordSynced = options.preferWordSynced ?? true
   }
 
   private emitProgress(
@@ -162,9 +174,9 @@ export class LyricsFetchQueue {
         this.emitProgress(query.trackId, 'fetching')
 
         const selectedProviders = this.resolveProvidersForQuery(query)
-        let best: LyricsCandidate | null = null
-        let bestScore = -1
+        let best: { candidate: LyricsCandidate; evaluation: CandidateEvaluation } | null = null
         let lastError: string | undefined
+        let lastErrorKind: ProviderErrorKind | undefined
 
         for (const provider of selectedProviders) {
           if (entry.cancelled || controller.signal.aborted) {
@@ -178,27 +190,50 @@ export class LyricsFetchQueue {
             if (entry.cancelled || controller.signal.aborted) {
               break
             }
-            if (candidate && candidate.score > bestScore) {
-              bestScore = candidate.score
-              best = candidate
+            if (!candidate) continue
+
+            const timingKind =
+              candidate.timingKind ??
+              detectLyricsTimingKind(candidate.syncedLyrics, candidate.plainLyrics)
+            const evaluation = evaluateCandidate({
+              timingKind,
+              score: candidate.score,
+              providerId: provider.id,
+              isLocalSidecar: provider.id === 'localSidecar',
+              preferWordSynced: this.preferWordSynced
+            })
+
+            // Reject unusable candidates and skip low-confidence ones without
+            // retaining them as fallbacks.
+            if (evaluation.decision === 'REJECT' || evaluation.decision === 'CONTINUE') {
+              continue
+            }
+
+            const evaluatedCandidate: LyricsCandidate = { ...candidate, timingKind }
+            const incoming = { candidate: evaluatedCandidate, evaluation }
+            const chosen: { candidate: LyricsCandidate; evaluation: CandidateEvaluation } =
+              pickBetterCandidate(best, incoming)
+            if (chosen !== best) {
+              best = chosen
               this.emitProgress(query.trackId, 'fetching', {
                 providerId: provider.id,
-                candidate
+                candidate: chosen.candidate
               })
             }
-            // Short-circuit remaining providers when a local synced sidecar is found.
-            if (provider.id === 'localSidecar' && candidate?.syncedLyrics) {
+
+            if (evaluation.decision === 'ACCEPT_FINAL') {
               break
             }
           } catch (error) {
             if (entry.cancelled || controller.signal.aborted) {
               break
             }
-            const message = error instanceof Error ? error.message : String(error)
-            lastError = message
+            const providerError = classifyProviderError(error, provider.id)
+            lastError = providerError.message
+            lastErrorKind = providerError.kind
             this.emitProgress(query.trackId, 'fetching', {
               providerId: provider.id,
-              error: message
+              error: providerError.message
             })
           }
         }
@@ -212,13 +247,20 @@ export class LyricsFetchQueue {
         }
 
         if (best === null && lastError !== undefined) {
-          this.emitProgress(query.trackId, 'error', { error: lastError })
+          this.emitProgress(query.trackId, 'error', {
+            error: lastError,
+            ...(lastErrorKind !== undefined ? { errorKind: lastErrorKind } : {})
+          })
           resolve(null)
           continue
         }
 
-        this.emitProgress(query.trackId, 'done', best ? { candidate: best } : undefined)
-        resolve(best)
+        this.emitProgress(
+          query.trackId,
+          'done',
+          best ? { candidate: best.candidate } : undefined
+        )
+        resolve(best?.candidate ?? null)
       }
     } finally {
       this.activeEntry = null

@@ -14,6 +14,8 @@
  * This module must stay free of Node-only and DOM-only imports.
  */
 
+import type { LyricsTimingKind } from './types'
+
 export interface LrcLine {
   timeMs: number
   text: string
@@ -63,6 +65,97 @@ function formatTimeBody(ms: number): string {
  */
 export function formatTimestamp(ms: number): string {
   return `[${formatTimeBody(ms)}]`
+}
+
+const TIMED_LINE_RE = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g
+const TIMED_WORD_RE = /<(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?>/g
+const METADATA_LINE_RE = /^\[[a-zA-Z][a-zA-Z0-9_-]*:[^\]]*\]$/
+
+/** A timestamp is valid when its seconds component is 00-59. */
+function isValidSeconds(ss: string): boolean {
+  const seconds = Number.parseInt(ss, 10)
+  return Number.isFinite(seconds) && seconds >= 0 && seconds <= 59
+}
+
+/**
+ * Splits a line into its leading timestamps and the remaining text.
+ * Returns `null` when the line does not begin with a valid `[mm:ss.xx]` tag.
+ */
+function splitLeadingTimestamps(line: string): string | null {
+  let rest = line
+  let found = false
+  TIMED_LINE_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = TIMED_LINE_RE.exec(rest)) !== null) {
+    if (match.index !== 0) break
+    if (!isValidSeconds(match[2]!)) return null
+    found = true
+    rest = rest.slice(match[0].length)
+  }
+  return found ? rest : null
+}
+
+/** True when any non-metadata line has visible lyric text after tag removal. */
+function hasLyricText(raw: string): boolean {
+  const cleaned = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw
+  for (const rawLine of cleaned.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (line.length === 0) continue
+    if (METADATA_LINE_RE.test(line)) continue
+    const rest = splitLeadingTimestamps(line)
+    const text = (rest ?? line).replace(TIMED_WORD_RE, '').trim()
+    if (text.length > 0) return true
+  }
+  return false
+}
+
+/** True when the text contains at least one valid A2 word tag on a timed line. */
+function hasValidWordTagOnTimedLine(text: string): boolean {
+  TIMED_WORD_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = TIMED_WORD_RE.exec(text)) !== null) {
+    if (isValidSeconds(match[2]!)) return true
+  }
+  return false
+}
+
+/**
+ * Classifies a lyric payload by its timing granularity.
+ *
+ * - `word`: timed lines containing valid A2 `<mm:ss.xx>` word tags.
+ * - `line`: at least one valid `[mm:ss.xx]` line timestamp.
+ * - `plain`: untimed text, or timestamps that are malformed/out of range.
+ * - `instrumental`: explicitly marked instrumental with no lyric text.
+ * - `none`: no lyric content at all.
+ */
+export function detectLyricsTimingKind(
+  syncedLyrics: string | null | undefined,
+  plainLyrics: string | null | undefined,
+  instrumental = false
+): LyricsTimingKind {
+  const synced = syncedLyrics ?? ''
+  const plain = plainLyrics ?? ''
+  const syncedHasText = hasLyricText(synced)
+  const plainHasText = hasLyricText(plain)
+
+  if (instrumental && !syncedHasText && !plainHasText) return 'instrumental'
+
+  const cleaned = synced.charCodeAt(0) === 0xfeff ? synced.slice(1) : synced
+  let timedLines = 0
+  let wordLines = 0
+  for (const rawLine of cleaned.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (line.length === 0) continue
+    if (METADATA_LINE_RE.test(line)) continue
+    const rest = splitLeadingTimestamps(line)
+    if (rest === null) continue
+    timedLines++
+    if (hasValidWordTagOnTimedLine(rest)) wordLines++
+  }
+
+  if (timedLines > 0) return wordLines > 0 ? 'word' : 'line'
+  if (syncedHasText || plainHasText) return 'plain'
+  return 'none'
 }
 
 /**

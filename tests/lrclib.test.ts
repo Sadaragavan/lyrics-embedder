@@ -5,6 +5,7 @@ import {
   type FetchFunction,
   type SleepFunction
 } from '../src/main/providers/lrclib'
+import { ProviderError } from '../src/main/providers/router'
 import type { LyricsQuery, LyricsSearchRequest } from '../src/shared/types'
 
 function makeQuery(overrides: Partial<LyricsQuery> = {}): LyricsQuery {
@@ -106,7 +107,8 @@ describe('LrclibProvider', () => {
     expect(result!.providerId).toBe('lrclib')
     expect(result!.syncedLyrics).toBe('[00:01.00]Hello')
     expect(result!.plainLyrics).toBe('Hello')
-    expect(result!.score).toBe(18)
+    expect(result!.score).toBe(88)
+    expect(result!.timingKind).toBe('line')
   })
 
   it('falls back to /api/search with ~400ms pacing after fetchFn completes on 404', async () => {
@@ -152,10 +154,8 @@ describe('LrclibProvider', () => {
     expect(vi.mocked(fetchFn).mock.calls[0]![0]).toContain('/api/search')
   })
 
-  it('returns null when both endpoints return 404', async () => {
-    vi.mocked(fetchFn)
-      .mockResolvedValueOnce(new Response(null, { status: 404 }))
-      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+  it('returns null when all variants and endpoints return 404', async () => {
+    vi.mocked(fetchFn).mockResolvedValue(new Response(null, { status: 404 }))
 
     const result = await provider.fetch(makeQuery())
     expect(result).toBeNull()
@@ -234,6 +234,74 @@ describe('LrclibProvider', () => {
     expect(vi.mocked(fetchFn)).toHaveBeenCalledTimes(1)
   })
 
+  it('populates timingKind=word for A2 word-synced candidates', async () => {
+    const wordLrc = '[00:01.00]<00:01.00>Hel<00:01.50>lo'
+    vi.mocked(fetchFn).mockResolvedValueOnce(
+      jsonResponse({
+        id: 1,
+        trackName: 'Test Song',
+        artistName: 'Test Artist',
+        duration: 240,
+        syncedLyrics: wordLrc,
+        plainLyrics: null
+      })
+    )
+
+    const result = await provider.fetch(makeQuery())
+    expect(result!.timingKind).toBe('word')
+    expect(result!.syncedLyrics).toBe(wordLrc)
+  })
+
+  it('treats invalid timestamps as plain lyrics', async () => {
+    vi.mocked(fetchFn)
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: 1,
+          trackName: 'Test Song',
+          artistName: 'Test Artist',
+          duration: 240,
+          syncedLyrics: '[00:75.00]Bad timestamp',
+          plainLyrics: null
+        })
+      )
+      .mockResolvedValue(new Response(null, { status: 404 }))
+
+    const result = await provider.fetch(makeQuery())
+    expect(result!.timingKind).toBe('plain')
+    expect(result!.syncedLyrics).toBeNull()
+    expect(result!.plainLyrics).toBe('[00:75.00]Bad timestamp')
+  })
+
+  it('throws a typed RATE_LIMITED error on exhausted 429 retries', async () => {
+    vi.mocked(fetchFn).mockImplementation(async () => new Response(null, { status: 429 }))
+
+    const error = await provider.fetch(makeQuery()).catch((err: unknown) => err)
+    expect(error).toBeInstanceOf(ProviderError)
+    expect((error as ProviderError).kind).toBe('RATE_LIMITED')
+    expect((error as ProviderError).providerId).toBe('lrclib')
+  })
+
+  it('throws a typed NETWORK error on fetch failure', async () => {
+    vi.mocked(fetchFn).mockRejectedValueOnce(new TypeError('fetch failed'))
+
+    const error = await provider.fetch(makeQuery()).catch((err: unknown) => err)
+    expect(error).toBeInstanceOf(ProviderError)
+    expect((error as ProviderError).kind).toBe('NETWORK')
+  })
+
+  it('throws a typed BAD_RESPONSE error on invalid JSON', async () => {
+    vi.mocked(fetchFn).mockResolvedValueOnce(
+      new Response('not json', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    )
+
+    const error = await provider.fetch(makeQuery()).catch((err: unknown) => err)
+    expect(error).toBeInstanceOf(ProviderError)
+    expect((error as ProviderError).kind).toBe('BAD_RESPONSE')
+  })
+
   it('enforces sequential concurrency = 1 across concurrent fetch calls', async () => {
     const events: string[] = []
     let releaseFirst!: () => void
@@ -278,9 +346,11 @@ describe('LrclibProvider', () => {
     const headers = firstCall[1].headers as Record<string, string>
     expect(headers['User-Agent']).toContain('PowerampLrcEmbedder')
 
+    vi.mocked(fetchFn).mockClear()
     await provider.fetch(makeQuery({ durationSec: 5000 }))
-    const thirdCall = vi.mocked(fetchFn).mock.calls[2]!
-    expect(thirdCall[0]).not.toContain('duration=')
+    const firstCallOfSecondFetch = vi.mocked(fetchFn).mock.calls[0]!
+    expect(firstCallOfSecondFetch[0]).toContain('/api/get')
+    expect(firstCallOfSecondFetch[0]).not.toContain('duration=')
   })
 
   it('picks best result from search by score', async () => {
@@ -298,12 +368,15 @@ describe('LrclibProvider', () => {
     expect(result!.syncedLyrics).toBe('[00:01.00]Synced')
   })
 
-  it('aborts cleanly when signal is already aborted', async () => {
+  it('throws a typed ABORTED error when signal is already aborted', async () => {
     const controller = new AbortController()
     controller.abort()
 
-    const result = await provider.fetch(makeQuery(), controller.signal)
-    expect(result).toBeNull()
+    await expect(provider.fetch(makeQuery(), controller.signal)).rejects.toMatchObject({
+      name: 'ProviderError',
+      kind: 'ABORTED',
+      providerId: 'lrclib'
+    })
     expect(vi.mocked(fetchFn)).not.toHaveBeenCalled()
   })
 
@@ -377,19 +450,23 @@ describe('LrclibProvider', () => {
             }
           ])
         )
+        .mockResolvedValueOnce(new Response(null, { status: 404 }))
 
       const results = await provider.searchAllCandidates(makeSearchQuery())
 
       expect(results).toHaveLength(1)
       expect(results[0]!.syncedLyrics).toBe('[00:01.00]Search only')
-      expect(vi.mocked(fetchFn)).toHaveBeenCalledTimes(2)
-      expect(sleepCalls).toEqual([400])
+      // raw /api/get, raw /api/search, then cleaned /api/get (cleaned /api/search
+      // is deduplicated because it has the same q URL)
+      expect(vi.mocked(fetchFn)).toHaveBeenCalledTimes(3)
+      expect(sleepCalls).toEqual([400, 400])
     })
 
     it('uses interactive search overrides in /api/get and /api/search queries', async () => {
       vi.mocked(fetchFn)
         .mockResolvedValueOnce(new Response(null, { status: 404 }))
         .mockResolvedValueOnce(jsonResponse([]))
+        .mockResolvedValueOnce(new Response(null, { status: 404 }))
 
       await provider.searchAllCandidates(
         makeSearchQuery({

@@ -137,7 +137,8 @@ describe('LyricsFetchQueue', () => {
     expect(finalEvent).toEqual({
       trackId: 'c'.repeat(32),
       phase: 'error',
-      error: 'LRCLIB unavailable (HTTP 503)'
+      error: 'LRCLIB unavailable (HTTP 503)',
+      errorKind: 'RATE_LIMITED'
     })
   })
 
@@ -268,5 +269,84 @@ describe('LyricsFetchQueue', () => {
     d2.resolve()
     await p2
     expect(queue.pendingCount).toBe(0)
+  })
+
+  it('populates timingKind on the returned candidate', async () => {
+    const provider = makeProvider('lrclib', async () =>
+      makeCandidate('lrclib', 50, '[00:01.00]Hello')
+    )
+    const queue = new LyricsFetchQueue({ providers: [provider] })
+
+    const result = await queue.fetch(makeQuery('a'.repeat(32)))
+    expect(result!.timingKind).toBe('line')
+  })
+
+  it('discards candidates with no usable lyrics', async () => {
+    const onProgress = vi.fn()
+    const provider = makeProvider('lrclib', async () => ({
+      providerId: 'lrclib' as const,
+      syncedLyrics: null,
+      plainLyrics: null,
+      score: 50,
+      timingKind: 'none' as const
+    }))
+    const queue = new LyricsFetchQueue({ providers: [provider], onProgress })
+
+    const result = await queue.fetch(makeQuery('a'.repeat(32)))
+    expect(result).toBeNull()
+    expect(onProgress.mock.calls.at(-1)?.[0]?.phase).toBe('done')
+  })
+
+  it('retains line-synced remote fallback and continues searching for word-synced', async () => {
+    const lineFetch = vi.fn(async () => makeCandidate('lrclib', 60, '[00:01.00]Line'))
+    const wordFetch = vi.fn(async () =>
+      makeCandidate('localSidecar', 70, '[00:01.00]<00:01.00>W<00:01.50>ord')
+    )
+    const queue = new LyricsFetchQueue({
+      providers: [
+        makeProvider('lrclib', lineFetch),
+        makeProvider('localSidecar', wordFetch)
+      ],
+      preferWordSynced: true
+    })
+
+    const result = await queue.fetch(makeQuery('a'.repeat(32)))
+    expect(lineFetch).toHaveBeenCalledOnce()
+    expect(wordFetch).toHaveBeenCalledOnce()
+    expect(result!.timingKind).toBe('word')
+    expect(result!.syncedLyrics).toContain('<00:01.50>')
+  })
+
+  it('breaks on a local sidecar synced match (ACCEPT_FINAL)', async () => {
+    const remoteFetch = vi.fn(async () => makeCandidate('lrclib', 90, '[00:01.00]Remote'))
+    const queue = new LyricsFetchQueue({
+      providers: [
+        makeProvider('localSidecar', async () =>
+          makeCandidate('localSidecar', 100, '[00:01.00]Local')
+        ),
+        makeProvider('lrclib', remoteFetch)
+      ],
+      preferWordSynced: true
+    })
+
+    const result = await queue.fetch(makeQuery('a'.repeat(32)))
+    expect(result!.providerId).toBe('localSidecar')
+    expect(remoteFetch).not.toHaveBeenCalled()
+  })
+
+  it('emits errorKind for a typed network failure', async () => {
+    const onProgress = vi.fn()
+    const queue = new LyricsFetchQueue({
+      providers: [
+        makeProvider('lrclib', async () => {
+          throw Object.assign(new Error('Network down'), { kind: 'NETWORK' })
+        })
+      ],
+      onProgress
+    })
+
+    await queue.fetch(makeQuery('a'.repeat(32)))
+    const finalEvent = onProgress.mock.calls.at(-1)?.[0]
+    expect(finalEvent).toMatchObject({ phase: 'error', errorKind: 'NETWORK' })
   })
 })

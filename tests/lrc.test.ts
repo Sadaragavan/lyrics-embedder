@@ -7,7 +7,8 @@ import {
   formatTimestamp,
   extractOffset,
   stackLrcLayers,
-  shiftLrcOffset
+  shiftLrcOffset,
+  detectLyricsTimingKind
 } from '../src/shared/lrc'
 
 describe('parseTimestamp', () => {
@@ -219,5 +220,39 @@ describe('shiftLrcOffset', () => {
     expect(shiftLrcOffset(raw, 500, { preserveWordTags: true })).toBe(
       '[00:01.50]Hello <00:02.00>world'
     )
+  })
+})
+
+describe('detectLyricsTimingKind', () => {
+  it('detects word-synced A2 tags on timed lines', () => {
+    expect(
+      detectLyricsTimingKind('[00:01.00]<00:01.00>Hel<00:01.50>lo', null)
+    ).toBe('word')
+  })
+
+  it('detects line-synced timestamps', () => {
+    expect(detectLyricsTimingKind('[00:01.00]Hello\n[00:05.00]World', null)).toBe('line')
+  })
+
+  it('returns plain for untimed text', () => {
+    expect(detectLyricsTimingKind(null, 'Just plain lyrics')).toBe('plain')
+  })
+
+  it('returns plain when timestamps are invalid', () => {
+    expect(detectLyricsTimingKind('[00:75.00]Bad timestamp', null)).toBe('plain')
+    expect(detectLyricsTimingKind('[not-a-time]Bad timestamp', null)).toBe('plain')
+  })
+
+  it('returns instrumental when marked and no lyrics exist', () => {
+    expect(detectLyricsTimingKind(null, null, true)).toBe('instrumental')
+  })
+
+  it('returns none when no lyrics exist', () => {
+    expect(detectLyricsTimingKind(null, null)).toBe('none')
+    expect(detectLyricsTimingKind('', '')).toBe('none')
+  })
+
+  it('ignores metadata headers when classifying', () => {
+    expect(detectLyricsTimingKind('[ti:Song]\n[ar:Artist]', null)).toBe('none')
   })
 })

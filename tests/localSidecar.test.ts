@@ -81,6 +81,7 @@ describe('LocalSidecarProvider', () => {
     expect(result!.syncedLyrics).toBeNull()
     expect(result!.plainLyrics).toBe('Just plain text lyrics')
     expect(result!.score).toBe(6)
+    expect(result!.timingKind).toBe('plain')
   })
 
   it('reads real UTF-8 BOM sibling .lrc file from disk', async () => {

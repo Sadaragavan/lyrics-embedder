@@ -95,11 +95,37 @@ export interface LyricsQuery {
   providerIds?: LyricsProviderId[]
 }
 
+/** Granularity of a candidate's timing data, derived from its lyric payload. */
+export type LyricsTimingKind = 'word' | 'line' | 'plain' | 'instrumental' | 'none'
+
+/** Why the router accepted, deferred, or rejected a candidate. */
+export type SelectionDecision = 'ACCEPT_FINAL' | 'CONTINUE' | 'KEEP_AS_FALLBACK' | 'REJECT'
+
+/** Normalized provider failure categories surfaced through fetch progress. */
+export type ProviderErrorKind =
+  | 'RATE_LIMITED'
+  | 'NETWORK'
+  | 'NOT_FOUND'
+  | 'BAD_RESPONSE'
+  | 'ABORTED'
+  | 'UNKNOWN'
+
 export interface LyricsCandidate {
   providerId: LyricsProviderId
   syncedLyrics: string | null
   plainLyrics: string | null
   score: number
+  /** Timing granularity; populated by providers via `detectLyricsTimingKind`. */
+  timingKind?: LyricsTimingKind
+}
+
+/** Router verdict for a single candidate, with an auditable reason. */
+export interface CandidateEvaluation {
+  timingKind: LyricsTimingKind
+  score: number
+  decision: SelectionDecision
+  reason: string
+  durationDeltaSec?: number
 }
 
 export interface LyricsSearchRequest {
@@ -211,4 +237,6 @@ export interface LyricsFetchProgress {
   providerId?: LyricsProviderId
   candidate?: LyricsCandidate
   error?: string
+  /** Normalized failure category when `phase === 'error'`. */
+  errorKind?: ProviderErrorKind
 }

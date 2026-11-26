@@ -2,19 +2,31 @@
  * LRCLIB lyrics provider.
  *
  * Sequential `concurrency = 1`, ~400ms pacing (recorded in `finally` after each
- * request completes), custom `User-Agent`, `/api/get` -> `/api/search` fallback
- * strictly on 404/empty match, and `429`/`503` `Retry-After` (seconds + HTTP-date)
- * + jittered exponential backoff. Throws on network failure or exhausted retries.
+ * request completes), custom `User-Agent`, and jittered exponential backoff with
+ * `Retry-After` support on `429`/`503`. Queries are generated from
+ * `buildQueryVariants`, every result is scored with `scoreCandidate`, and the
+ * router decides whether to accept, keep as fallback, or keep searching.
+ * Failures surface as typed `ProviderError`s.
  */
 
+import { detectLyricsTimingKind } from '@shared/lrc'
+import { buildQueryVariants, scoreCandidate, type QueryVariant } from '@shared/trackMatching'
 import type {
+  CandidateEvaluation,
   LyricsCandidate,
   LyricsProvider,
   LyricsProviderId,
   LyricsQuery,
   LyricsSearchRequest,
-  LyricsSearchResult
+  LyricsSearchResult,
+  ProviderErrorKind
 } from '@shared/types'
+import {
+  classifyProviderError,
+  evaluateCandidate,
+  pickBetterCandidate,
+  ProviderError
+} from './router'
 
 const LRCLIB_BASE = 'https://lrclib.net'
 const PROVIDER_ID: LyricsProviderId = 'lrclib'
@@ -45,6 +57,11 @@ interface LrclibGetResponse {
   duration?: number
   syncedLyrics?: string | null
   plainLyrics?: string | null
+}
+
+interface EvaluatedCandidate {
+  candidate: LyricsCandidate
+  evaluation: CandidateEvaluation
 }
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -86,18 +103,32 @@ export function parseRetryAfterMs(value: string | null, nowMs: number = Date.now
   return null
 }
 
-function scoreLrclibResult(result: LrclibGetResponse, query: LyricsQuery): number {
-  let score = 0
-  if (result.syncedLyrics) score += 10
-  if (result.plainLyrics) score += 5
-  if (
-    result.duration !== undefined &&
-    query.durationSec > 0 &&
-    Math.abs(result.duration - query.durationSec) <= 3
-  ) {
-    score += 3
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined
+}
+
+function normalizeResult(value: unknown): LrclibGetResponse | null {
+  if (!isRecord(value)) return null
+  const result: LrclibGetResponse = {}
+  if (typeof value.id === 'number' && Number.isFinite(value.id)) {
+    result.id = value.id
   }
-  return score
+  const trackName = readString(value.trackName)
+  if (trackName) result.trackName = trackName
+  const artistName = readString(value.artistName)
+  if (artistName) result.artistName = artistName
+  const albumName = readString(value.albumName)
+  if (albumName) result.albumName = albumName
+  if (typeof value.duration === 'number' && Number.isFinite(value.duration)) {
+    result.duration = value.duration
+  }
+  result.syncedLyrics = typeof value.syncedLyrics === 'string' ? value.syncedLyrics : null
+  result.plainLyrics = typeof value.plainLyrics === 'string' ? value.plainLyrics : null
+  return result
 }
 
 export class LrclibProvider implements LyricsProvider {
@@ -130,10 +161,9 @@ export class LrclibProvider implements LyricsProvider {
   }
 
   /**
-   * Interactive candidate listing: queries `/api/get` and `/api/search`, dedups
-   * by provider id (falling back to metadata + lyrics text), and returns every
-   * usable match sorted by score. Shares the same `concurrency = 1` queue and
-   * pacing state as `fetch()`.
+   * Interactive candidate listing: walks query variants, dedups by record id,
+   * and returns every usable match sorted by `scoreCandidate`. Shares the same
+   * `concurrency = 1` queue and pacing state as `fetch()`.
    */
   searchAllCandidates(
     query: LyricsSearchRequest,
@@ -151,40 +181,66 @@ export class LrclibProvider implements LyricsProvider {
     return run
   }
 
+  private throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw new ProviderError('ABORTED', 'LRCLIB request aborted', { providerId: PROVIDER_ID })
+    }
+  }
+
   private async performFetch(
     query: LyricsQuery,
     signal?: AbortSignal
   ): Promise<LyricsCandidate | null> {
-    if (signal?.aborted) return null
+    this.throwIfAborted(signal)
 
-    const hasExactFields = query.title.trim().length > 0 && query.artist.trim().length > 0
-    if (hasExactFields) {
-      const getResult = await this.tryGet(query, signal)
-      if (signal?.aborted) return null
-      if (getResult) {
-        return {
-          providerId: PROVIDER_ID,
-          syncedLyrics: getResult.syncedLyrics ?? null,
-          plainLyrics: getResult.plainLyrics ?? null,
-          score: scoreLrclibResult(getResult, query)
+    const variants = buildQueryVariants(query)
+    let best: EvaluatedCandidate | null = null
+
+    for (const variant of variants) {
+      this.throwIfAborted(signal)
+      if (variant.title.length === 0) continue
+
+      if (variant.artist.length > 0) {
+        const getResult = await this.tryGet(variant, query.durationSec, signal)
+        this.throwIfAborted(signal)
+        if (getResult) {
+          const evaluated = this.evaluateResult(getResult, variant, query)
+          if (evaluated.evaluation.decision === 'ACCEPT_FINAL') return evaluated.candidate
+          if (evaluated.evaluation.decision === 'KEEP_AS_FALLBACK') {
+            best = pickBetterCandidate(best, evaluated)
+          }
+        }
+
+        const structured = await this.trySearchStructured(variant, signal)
+        this.throwIfAborted(signal)
+        const structuredBest = this.evaluateResults(structured, variant, query)
+        if (structuredBest) {
+          if (structuredBest.evaluation.decision === 'ACCEPT_FINAL') {
+            return structuredBest.candidate
+          }
+          if (structuredBest.evaluation.decision === 'KEEP_AS_FALLBACK') {
+            best = pickBetterCandidate(best, structuredBest)
+          }
         }
       }
     }
 
-    if (signal?.aborted) return null
-
-    const searchResult = await this.trySearch(query, signal)
-    if (signal?.aborted) return null
-    if (searchResult) {
-      return {
-        providerId: PROVIDER_ID,
-        syncedLyrics: searchResult.syncedLyrics ?? null,
-        plainLyrics: searchResult.plainLyrics ?? null,
-        score: scoreLrclibResult(searchResult, query)
+    // Broad `q` fallback runs only when no variant produced a final acceptance.
+    this.throwIfAborted(signal)
+    const fallbackVariant = variants[0]
+    if (fallbackVariant && fallbackVariant.title.length > 0) {
+      const broad = await this.trySearchQuery(fallbackVariant, signal)
+      this.throwIfAborted(signal)
+      const broadBest = this.evaluateResults(broad, fallbackVariant, query)
+      if (broadBest) {
+        if (broadBest.evaluation.decision === 'ACCEPT_FINAL') return broadBest.candidate
+        if (broadBest.evaluation.decision === 'KEEP_AS_FALLBACK') {
+          best = pickBetterCandidate(best, broadBest)
+        }
       }
     }
 
-    return null
+    return best?.candidate ?? null
   }
 
   private buildEffectiveQuery(query: LyricsSearchRequest): LyricsQuery {
@@ -205,12 +261,15 @@ export class LrclibProvider implements LyricsProvider {
     query: LyricsSearchRequest,
     signal?: AbortSignal
   ): Promise<LyricsSearchResult[]> {
-    if (signal?.aborted) return []
+    this.throwIfAborted(signal)
 
     const effectiveQuery = this.buildEffectiveQuery(query)
+    const variants = buildQueryVariants(effectiveQuery)
+    const requestedUrls = new Set<string>()
     const collected: LrclibGetResponse[] = []
     const seenIds = new Set<number>()
     const seenLyrics = new Set<string>()
+    let lastError: ProviderError | null = null
 
     const collect = (result: LrclibGetResponse): void => {
       if (!result.syncedLyrics && !result.plainLyrics) return
@@ -226,55 +285,206 @@ export class LrclibProvider implements LyricsProvider {
       collected.push(result)
     }
 
-    const hasExactFields =
-      effectiveQuery.title.trim().length > 0 && effectiveQuery.artist.trim().length > 0
-    if (hasExactFields) {
-      const getResult = await this.tryGet(effectiveQuery, signal)
-      if (signal?.aborted) return []
-      if (getResult) collect(getResult)
+    for (const variant of variants) {
+      this.throwIfAborted(signal)
+      if (variant.title.length === 0) continue
+
+      try {
+        if (variant.artist.length > 0) {
+          const getResult = await this.tryGet(
+            variant,
+            effectiveQuery.durationSec,
+            signal,
+            requestedUrls
+          )
+          if (getResult) collect(getResult)
+        }
+
+        const searchResults = await this.trySearchQuery(variant, signal, requestedUrls)
+        for (const result of searchResults) collect(result)
+      } catch (error) {
+        const providerError = classifyProviderError(error, PROVIDER_ID)
+        if (providerError.kind === 'ABORTED') throw providerError
+        // Keep partial results from earlier variants; only the final throw
+        // happens when nothing at all was collected.
+        lastError = providerError
+      }
     }
 
-    if (signal?.aborted) return []
-
-    const searchResults = await this.trySearchMany(effectiveQuery, signal)
-    if (signal?.aborted) return []
-    for (const result of searchResults) collect(result)
+    if (collected.length === 0 && lastError) throw lastError
 
     return collected
       .map((result) => this.toSearchResult(result, effectiveQuery))
       .sort((a, b) => {
         if (b.score !== a.score) return b.score - a.score
         return (
-          Math.abs(a.durationSec - query.durationSec) -
-          Math.abs(b.durationSec - query.durationSec)
+          Math.abs(a.durationSec - effectiveQuery.durationSec) -
+          Math.abs(b.durationSec - effectiveQuery.durationSec)
         )
       })
   }
 
-  private async trySearchMany(
-    query: LyricsQuery,
-    signal?: AbortSignal
-  ): Promise<LrclibGetResponse[]> {
-    const searchQuery = `${query.artist} ${query.title}`.trim()
-    if (searchQuery.length === 0) return []
-
+  private buildGetUrl(variant: QueryVariant, durationSec: number): string {
     const params = new URLSearchParams()
-    params.set('q', searchQuery)
-
-    const url = `${this.baseUrl}/api/search?${params.toString()}`
-    const response = await this.fetchWithRetry(url, signal)
-    if (!response) return []
-
-    const data = (await response.json()) as LrclibGetResponse[]
-    if (!Array.isArray(data)) return []
-    return data.filter((result) => Boolean(result.syncedLyrics || result.plainLyrics))
+    params.set('track_name', variant.title)
+    params.set('artist_name', variant.artist)
+    if (variant.album) params.set('album_name', variant.album)
+    const roundedDuration = Math.round(durationSec)
+    if (roundedDuration >= 1 && roundedDuration <= 3600) {
+      params.set('duration', String(roundedDuration))
+    }
+    return `${this.baseUrl}/api/get?${params.toString()}`
   }
 
-  private toSearchResult(
+  private buildStructuredSearchUrl(variant: QueryVariant): string {
+    const params = new URLSearchParams()
+    params.set('track_name', variant.title)
+    params.set('artist_name', variant.artist)
+    if (variant.album) params.set('album_name', variant.album)
+    return `${this.baseUrl}/api/search?${params.toString()}`
+  }
+
+  private buildQuerySearchUrl(variant: QueryVariant): string {
+    const params = new URLSearchParams()
+    params.set('q', `${variant.artist} ${variant.title}`.trim())
+    return `${this.baseUrl}/api/search?${params.toString()}`
+  }
+
+  private async requestJson(
+    url: string,
+    signal?: AbortSignal,
+    seen?: Set<string>
+  ): Promise<unknown | null> {
+    if (seen) {
+      if (seen.has(url)) return null
+      seen.add(url)
+    }
+
+    const response = await this.fetchWithRetry(url, signal)
+    if (!response) return null
+
+    try {
+      return (await response.json()) as unknown
+    } catch (error) {
+      throw new ProviderError('BAD_RESPONSE', 'LRCLIB returned invalid JSON', {
+        providerId: PROVIDER_ID,
+        cause: error
+      })
+    }
+  }
+
+  private parseResultArray(data: unknown): LrclibGetResponse[] {
+    if (data === null) return []
+    if (!Array.isArray(data)) {
+      throw new ProviderError('BAD_RESPONSE', 'LRCLIB /api/search returned a non-array payload', {
+        providerId: PROVIDER_ID
+      })
+    }
+    const results: LrclibGetResponse[] = []
+    for (const item of data) {
+      const result = normalizeResult(item)
+      if (result && (result.syncedLyrics || result.plainLyrics)) {
+        results.push(result)
+      }
+    }
+    return results
+  }
+
+  private async trySearchStructured(
+    variant: QueryVariant,
+    signal?: AbortSignal,
+    seen?: Set<string>
+  ): Promise<LrclibGetResponse[]> {
+    if (variant.title.length === 0 || variant.artist.length === 0) return []
+    const data = await this.requestJson(this.buildStructuredSearchUrl(variant), signal, seen)
+    return this.parseResultArray(data)
+  }
+
+  private async trySearchQuery(
+    variant: QueryVariant,
+    signal?: AbortSignal,
+    seen?: Set<string>
+  ): Promise<LrclibGetResponse[]> {
+    if (`${variant.artist} ${variant.title}`.trim().length === 0) return []
+    const data = await this.requestJson(this.buildQuerySearchUrl(variant), signal, seen)
+    return this.parseResultArray(data)
+  }
+
+  private evaluateResult(
     result: LrclibGetResponse,
+    variant: QueryVariant,
     query: LyricsQuery
-  ): LyricsSearchResult {
+  ): EvaluatedCandidate {
+    const rawSynced = result.syncedLyrics ?? null
+    const rawPlain = result.plainLyrics ?? null
+    const detected = detectLyricsTimingKind(rawSynced, rawPlain)
+
+    // Invalid timestamps are treated as plain text so downstream consumers do
+    // not try to parse them as synced lines.
+    const syncedLyrics = detected === 'plain' ? null : rawSynced
+    const plainLyrics = detected === 'plain' ? (rawPlain ?? rawSynced) : rawPlain
+
+    const scored = scoreCandidate({
+      queryTitle: variant.title,
+      queryArtist: variant.artist,
+      queryAlbum: variant.album,
+      queryDurationSec: query.durationSec,
+      candidateTitle: result.trackName ?? null,
+      candidateArtist: result.artistName ?? null,
+      candidateAlbum: result.albumName ?? null,
+      candidateDurationSec: result.duration ?? null,
+      syncedLyrics,
+      plainLyrics
+    })
+
+    const candidate: LyricsCandidate = {
+      providerId: PROVIDER_ID,
+      syncedLyrics,
+      plainLyrics,
+      score: scored.score,
+      timingKind: scored.timingKind
+    }
+
+    const evaluation = evaluateCandidate({
+      timingKind: scored.timingKind,
+      score: scored.score,
+      providerId: PROVIDER_ID,
+      durationDeltaSec: scored.durationDeltaSec
+    })
+
+    return { candidate, evaluation }
+  }
+
+  private evaluateResults(
+    results: LrclibGetResponse[],
+    variant: QueryVariant,
+    query: LyricsQuery
+  ): EvaluatedCandidate | null {
+    let best: EvaluatedCandidate | null = null
+    for (const result of results) {
+      const evaluated = this.evaluateResult(result, variant, query)
+      if (evaluated.evaluation.decision === 'REJECT' || evaluated.evaluation.decision === 'CONTINUE') {
+        continue
+      }
+      best = pickBetterCandidate(best, evaluated)
+    }
+    return best
+  }
+
+  private toSearchResult(result: LrclibGetResponse, query: LyricsQuery): LyricsSearchResult {
     const sourceId = typeof result.id === 'number' ? String(result.id) : undefined
+    const scored = scoreCandidate({
+      queryTitle: query.title,
+      queryArtist: query.artist,
+      queryAlbum: query.album,
+      queryDurationSec: query.durationSec,
+      candidateTitle: result.trackName ?? null,
+      candidateArtist: result.artistName ?? null,
+      candidateAlbum: result.albumName ?? null,
+      candidateDurationSec: result.duration ?? null,
+      syncedLyrics: result.syncedLyrics ?? null,
+      plainLyrics: result.plainLyrics ?? null
+    })
     return {
       providerId: PROVIDER_ID,
       ...(sourceId ? { sourceId } : {}),
@@ -288,7 +498,7 @@ export class LrclibProvider implements LyricsProvider {
       syncedLyrics: result.syncedLyrics ?? null,
       plainLyrics: result.plainLyrics ?? null,
       ...(sourceId ? { sourceRef: `${this.baseUrl}/api/get/${sourceId}` } : {}),
-      score: scoreLrclibResult(result, query)
+      score: scored.score
     }
   }
 
@@ -306,16 +516,19 @@ export class LrclibProvider implements LyricsProvider {
 
   /**
    * Executes an HTTP GET with pacing and bounded retries.
-   * Returns `null` only for HTTP 404 (not found) or cancellation via `signal`.
-   * Throws on network failures, non-404 HTTP errors, and exhausted 429/503 retries.
+   * Returns `null` only for HTTP 404 (not found).
+   * Throws `ProviderError` on aborts, network failures, invalid statuses, and
+   * exhausted 429/503 retries.
    */
   private async fetchWithRetry(url: string, signal?: AbortSignal): Promise<Response | null> {
+    let lastRetryAfterMs: number | undefined
+
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      if (signal?.aborted) return null
+      this.throwIfAborted(signal)
 
       if (attempt === 0) {
         await this.pace(signal)
-        if (signal?.aborted) return null
+        this.throwIfAborted(signal)
       }
 
       let response: Response
@@ -329,8 +542,13 @@ export class LrclibProvider implements LyricsProvider {
           ...(signal ? { signal } : {})
         })
       } catch (error) {
-        if (signal?.aborted) return null
-        throw error instanceof Error ? error : new Error(String(error))
+        this.throwIfAborted(signal)
+        const providerError = classifyProviderError(error, PROVIDER_ID)
+        if (providerError.kind === 'ABORTED') throw providerError
+        throw new ProviderError('NETWORK', providerError.message, {
+          providerId: PROVIDER_ID,
+          cause: error
+        })
       } finally {
         this.lastRequestTime = this.nowFn()
       }
@@ -340,22 +558,34 @@ export class LrclibProvider implements LyricsProvider {
       }
 
       if (response.status === 429 || response.status === 503) {
+        const retryAfterMs = parseRetryAfterMs(response.headers.get('Retry-After'), this.nowFn())
+        if (retryAfterMs !== null) lastRetryAfterMs = retryAfterMs
+
         if (attempt === MAX_RETRIES) {
-          throw new Error(
-            `LRCLIB rate-limited/unavailable (HTTP ${response.status}) after ${MAX_RETRIES + 1} attempts`
+          throw new ProviderError(
+            'RATE_LIMITED',
+            `LRCLIB rate-limited/unavailable (HTTP ${response.status}) after ${MAX_RETRIES + 1} attempts`,
+            {
+              providerId: PROVIDER_ID,
+              ...(lastRetryAfterMs !== undefined ? { retryAfterMs: lastRetryAfterMs } : {})
+            }
           )
         }
-        const retryAfterMs = parseRetryAfterMs(response.headers.get('Retry-After'), this.nowFn())
+
         const delay =
           retryAfterMs !== null
             ? retryAfterMs
             : Math.min(this.jitter(BASE_BACKOFF_MS * 2 ** attempt), MAX_BACKOFF_MS)
         await this.sleepFn(delay, signal)
+        this.throwIfAborted(signal)
         continue
       }
 
       if (!response.ok) {
-        throw new Error(`LRCLIB request failed (HTTP ${response.status})`)
+        const kind: ProviderErrorKind = response.status >= 500 ? 'NETWORK' : 'BAD_RESPONSE'
+        throw new ProviderError(kind, `LRCLIB request failed (HTTP ${response.status})`, {
+          providerId: PROVIDER_ID
+        })
       }
 
       return response
@@ -364,55 +594,24 @@ export class LrclibProvider implements LyricsProvider {
   }
 
   private async tryGet(
-    query: LyricsQuery,
-    signal?: AbortSignal
+    variant: QueryVariant,
+    durationSec: number,
+    signal?: AbortSignal,
+    seen?: Set<string>
   ): Promise<LrclibGetResponse | null> {
-    const params = new URLSearchParams()
-    params.set('track_name', query.title)
-    params.set('artist_name', query.artist)
-    if (query.album) params.set('album_name', query.album)
-    const roundedDuration = Math.round(query.durationSec)
-    if (roundedDuration >= 1 && roundedDuration <= 3600) {
-      params.set('duration', String(roundedDuration))
+    if (variant.title.length === 0 || variant.artist.length === 0) return null
+
+    const data = await this.requestJson(this.buildGetUrl(variant, durationSec), signal, seen)
+    if (data === null) return null
+    if (!isRecord(data)) {
+      throw new ProviderError('BAD_RESPONSE', 'LRCLIB /api/get returned an invalid payload', {
+        providerId: PROVIDER_ID
+      })
     }
 
-    const url = `${this.baseUrl}/api/get?${params.toString()}`
-    const response = await this.fetchWithRetry(url, signal)
-    if (!response) return null
-
-    const data = (await response.json()) as LrclibGetResponse
-    if (!data.syncedLyrics && !data.plainLyrics) return null
-    return data
-  }
-
-  private async trySearch(
-    query: LyricsQuery,
-    signal?: AbortSignal
-  ): Promise<LrclibGetResponse | null> {
-    const searchQuery = `${query.artist} ${query.title}`.trim()
-    if (searchQuery.length === 0) return null
-
-    const params = new URLSearchParams()
-    params.set('q', searchQuery)
-
-    const url = `${this.baseUrl}/api/search?${params.toString()}`
-    const response = await this.fetchWithRetry(url, signal)
-    if (!response) return null
-
-    const data = (await response.json()) as LrclibGetResponse[]
-    if (!Array.isArray(data) || data.length === 0) return null
-
-    let best: LrclibGetResponse | null = null
-    let bestScore = -1
-    for (const result of data) {
-      if (!result.syncedLyrics && !result.plainLyrics) continue
-      const s = scoreLrclibResult(result, query)
-      if (s > bestScore) {
-        bestScore = s
-        best = result
-      }
-    }
-    return best
+    const result = normalizeResult(data)
+    if (!result || (!result.syncedLyrics && !result.plainLyrics)) return null
+    return result
   }
 }
 

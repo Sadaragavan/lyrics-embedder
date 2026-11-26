@@ -7,6 +7,7 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { detectLyricsTimingKind } from '@shared/lrc'
 import type {
   LyricsCandidate,
   LyricsProvider,
@@ -94,13 +95,16 @@ export class LocalSidecarProvider implements LyricsProvider {
     const content = await readVerifiedLrcFile(sidecarPath, this.options)
     if (!content || signal?.aborted) return null
 
-    const hasTimestamps = /\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]/.test(content)
+    const timingKind = detectLyricsTimingKind(content, null)
+    const syncedLyrics = timingKind === 'word' || timingKind === 'line' ? content : null
+    const plainLyrics = syncedLyrics ? null : content
 
     return {
       providerId: PROVIDER_ID,
-      syncedLyrics: hasTimestamps ? content : null,
-      plainLyrics: hasTimestamps ? null : content,
-      score: hasTimestamps ? 100 : 6
+      syncedLyrics,
+      plainLyrics,
+      score: timingKind === 'word' || timingKind === 'line' ? 100 : 6,
+      timingKind
     }
   }
 }
