@@ -1,19 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { Pause, Play, Square, Volume2 } from 'lucide-react'
-import type { TagEngineHealth, TrackRecord } from '@shared/ipc'
+import type { TrackRecord } from '@shared/ipc'
 import { formatDuration } from '@shared/lyricsSync'
 import { createNonceGuard } from '@shared/nonceGuard'
 import type { PlayerCommand, SeekRequest } from '../types'
 
 export interface AudioPreviewPlayerProps {
   focusedTrack: TrackRecord | null
-  /** Every active line sharing the current timestamp, stacked top-to-bottom. */
+  /** Every active line sharing the current timestamp, stacked top-to-bottom.
+   *  Expected order: [primary, translation, romanization] */
   activeLineTexts: string[]
   seekRequest: SeekRequest | null
   /** One-shot command from the native Playback menu. */
   playerCommand: PlayerCommand | null
-  /** TagLib / WASI worker health, rendered as a quiet status dot. */
-  health?: TagEngineHealth | null
   /**
    * Transient info/success message shown in a reserved slot beside the TagLib
    * dot. Lives here so it never overlaps the editor (no floating overlays).
@@ -27,12 +26,16 @@ function normalizePathForCompare(filePath: string): string {
   return filePath.replace(/\\/g, '/').toLowerCase()
 }
 
+/**
+ * Bottom player with two-row fixed-height dock (~108px total):
+ * - Row 1 (~64px): 3-line stacked active lyric stage (Primary, Translation, Romanization)
+ * - Row 2 (~44px): Transport, track title, scrubber, current/total time, status slot
+ */
 export function AudioPreviewPlayer({
   focusedTrack,
   activeLineTexts,
   seekRequest,
   playerCommand,
-  health = null,
   statusMessage = null,
   onPlaybackChange,
   onPlayerError
@@ -57,12 +60,6 @@ export function AudioPreviewPlayer({
   const togglePlayRef = useRef<() => void>(() => undefined)
   const stopUnloadRef = useRef<() => void>(() => undefined)
   const handledCommandNonceRef = useRef<number | null>(null)
-  /**
-   * Each seek request nonce must be applied exactly once. The seek effect is
-   * keyed on `focusedTrack`, whose object identity changes after an embed
-   * (the track record is refreshed), which would otherwise re-apply the last
-   * seek and jump playback back to an old timestamp.
-   */
   const seekGuardRef = useRef(createNonceGuard())
 
   const stopAndUnload = useCallback(() => {
@@ -120,9 +117,7 @@ export function AudioPreviewPlayer({
       const nonce = ++loadNonceRef.current
       try {
         const media = await window.api.getMediaUrl(track.id)
-        if (loadNonceRef.current !== nonce) {
-          return
-        }
+        if (loadNonceRef.current !== nonce) return
 
         const currentEl = audioRef.current
         if (!currentEl) return
@@ -143,9 +138,7 @@ export function AudioPreviewPlayer({
         }
         await currentEl.play()
       } catch (error) {
-        if (loadNonceRef.current !== nonce) {
-          return
-        }
+        if (loadNonceRef.current !== nonce) return
         const message = error instanceof Error ? error.message : String(error)
         onPlayerErrorRef.current(`Audio preview failed: ${message}`)
       }
@@ -153,16 +146,11 @@ export function AudioPreviewPlayer({
     []
   )
 
-  // Handle click-to-seek requests from lyric lines. The nonce guard makes each
-  // request one-shot: re-running this effect (e.g. `focusedTrack` refreshed after
-  // an embed) must not replay a seek the user already left behind.
+  // Handle click-to-seek requests from lyric lines
   useEffect(() => {
-    if (!seekRequest || !focusedTrack || seekRequest.trackId !== focusedTrack.id) {
-      return
-    }
-    if (!seekGuardRef.current.shouldHandle(seekRequest.nonce)) {
-      return
-    }
+    if (!seekRequest || !focusedTrack || seekRequest.trackId !== focusedTrack.id) return
+    if (!seekGuardRef.current.shouldHandle(seekRequest.nonce)) return
+
     const targetSec = Math.max(0, seekRequest.timeMs / 1000)
     const audioEl = audioRef.current
     const loaded = loadedMediaRef.current
@@ -267,173 +255,175 @@ export function AudioPreviewPlayer({
     onPlaybackChange(loaded.trackId, nextSeconds * 1000, !audioEl.paused)
   }
 
-  const effectiveDuration =
-    durationSec > 0 ? durationSec : (focusedTrack?.durationSec ?? 0)
+  const effectiveDuration = durationSec > 0 ? durationSec : (focusedTrack?.durationSec ?? 0)
+
+  // Parse active lines into three layers: primary, translation, romanization
+  const [primaryLine, translationLine, romanizationLine] = useMemo(() => {
+    const lines = activeLineTexts
+    return [
+      lines[0] ?? '',
+      lines[1] ?? '',
+      lines[2] ?? ''
+    ]
+  }, [activeLineTexts])
 
   return (
-    <footer className="flex h-[70px] shrink-0 items-center gap-3 border-t border-zinc-800 bg-zinc-900/95 px-4">
-      <audio
-        ref={audioRef}
-        preload="metadata"
-        onLoadedMetadata={(event) => {
-          const el = event.currentTarget
-          if (Number.isFinite(el.duration) && el.duration > 0) {
-            setDurationSec(el.duration)
-          }
-          if (pendingSeekSecRef.current !== null) {
-            el.currentTime = pendingSeekSecRef.current
-            setCurrentTimeSec(pendingSeekSecRef.current)
-            pendingSeekSecRef.current = null
-          }
-        }}
-        onTimeUpdate={(event) => {
-          const el = event.currentTarget
-          const loaded = loadedMediaRef.current
-          setCurrentTimeSec(el.currentTime)
-          if (loaded) {
-            onPlaybackChange(loaded.trackId, el.currentTime * 1000, !el.paused)
-          }
-        }}
-        onPlay={() => {
-          const loaded = loadedMediaRef.current
-          setIsPlaying(true)
-          if (loaded && audioRef.current) {
-            onPlaybackChange(loaded.trackId, audioRef.current.currentTime * 1000, true)
-          }
-        }}
-        onPause={() => {
-          const loaded = loadedMediaRef.current
-          setIsPlaying(false)
-          if (loaded && audioRef.current) {
-            onPlaybackChange(loaded.trackId, audioRef.current.currentTime * 1000, false)
-          }
-        }}
-        onEnded={() => {
-          const loaded = loadedMediaRef.current
-          setIsPlaying(false)
-          if (loaded && audioRef.current) {
-            onPlaybackChange(loaded.trackId, audioRef.current.currentTime * 1000, false)
-          }
-        }}
-        onError={() => {
-          // Ignore empty-src resets triggered by stopAndUnload / onUnloadAudio
-          if (!loadedMediaRef.current) return
-          setIsPlaying(false)
-          onPlayerError('Failed to stream audio track over media://')
-        }}
-      />
-
-      <div className="flex w-full flex-1 min-w-0 items-center gap-3">
-        <div className="flex shrink-0 items-center gap-1.5">
-          <button
-            type="button"
-            aria-label={isPlaying && loadedTrackId === focusedTrack?.id ? 'Pause' : 'Play'}
-            title={
-              isPlaying && loadedTrackId === focusedTrack?.id
-                ? 'Pause the preview (keeps the media:// handle open)'
-                : 'Play the focused track over media:// (seek first with a lyric line)'
-            }
-            disabled={!focusedTrack && !loadedTrackId}
-            onClick={() => void handleTogglePlay()}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-600 text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {isPlaying && (!focusedTrack || loadedTrackId === focusedTrack.id) ? (
-              <Pause className="h-4 w-4" />
-            ) : (
-              <Play className="h-4 w-4 ml-0.5" />
-            )}
-          </button>
-          <button
-            type="button"
-            aria-label="Stop and unload audio"
-            title="Stop and unload the preview to release the Windows file lock"
-            disabled={!loadedTrackId}
-            onClick={stopAndUnload}
-            className="flex h-7 w-7 items-center justify-center rounded-md border border-zinc-700 bg-zinc-800 text-zinc-300 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Square className="h-3.5 w-3.5" />
-          </button>
+    <footer className="flex h-[108px] shrink-0 flex-col border-t border-zinc-800 bg-zinc-900/95">
+      {/* Row 1: 3-line Stacked Active Lyric Stage (fixed ~64px) */}
+      <div className="flex h-[64px] shrink-0 items-start gap-3 border-b border-zinc-800/50 bg-zinc-900/50 px-4">
+        {/* Primary */}
+        <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+          <span className="text-[10px] font-medium text-emerald-400 uppercase tracking-wide">Primary</span>
+          <span className="min-w-0 truncate text-[12px] leading-snug text-zinc-100">
+            {primaryLine || (loadedTrackId ? 'Playing media:// stream' : 'Audio idle')}
+          </span>
         </div>
 
-        <div className="w-52 min-w-0 shrink-0">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-100 truncate">
-            <Volume2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
-            <span className="truncate">
-              {loadedTitle ??
-                (focusedTrack
-                  ? `${focusedTrack.title}${focusedTrack.artist ? ` — ${focusedTrack.artist}` : ''}`
-                  : 'Select a track to preview')}
+        {/* Translation */}
+        <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+          <span className="text-[10px] font-medium text-sky-400 uppercase tracking-wide">Translation</span>
+          <span className="min-w-0 truncate text-[12px] leading-snug text-sky-200/90">
+            {translationLine || '—'}
+          </span>
+        </div>
+
+        {/* Romanization */}
+        <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+          <span className="text-[10px] font-medium text-violet-400 uppercase tracking-wide">Romanization</span>
+          <span className="min-w-0 truncate text-[12px] leading-snug text-violet-200/90">
+            {romanizationLine || '—'}
+          </span>
+        </div>
+      </div>
+
+      {/* Row 2: Transport Bar (fixed ~44px) */}
+      <div className="flex h-[44px] shrink-0 items-center gap-3 px-4">
+        <audio
+          ref={audioRef}
+          preload="metadata"
+          onLoadedMetadata={(event) => {
+            const el = event.currentTarget
+            if (Number.isFinite(el.duration) && el.duration > 0) {
+              setDurationSec(el.duration)
+            }
+            if (pendingSeekSecRef.current !== null) {
+              el.currentTime = pendingSeekSecRef.current
+              setCurrentTimeSec(pendingSeekSecRef.current)
+              pendingSeekSecRef.current = null
+            }
+          }}
+          onTimeUpdate={(event) => {
+            const el = event.currentTarget
+            const loaded = loadedMediaRef.current
+            setCurrentTimeSec(el.currentTime)
+            if (loaded) {
+              onPlaybackChange(loaded.trackId, el.currentTime * 1000, !el.paused)
+            }
+          }}
+          onPlay={() => {
+            const loaded = loadedMediaRef.current
+            setIsPlaying(true)
+            if (loaded && audioRef.current) {
+              onPlaybackChange(loaded.trackId, audioRef.current.currentTime * 1000, true)
+            }
+          }}
+          onPause={() => {
+            const loaded = loadedMediaRef.current
+            setIsPlaying(false)
+            if (loaded && audioRef.current) {
+              onPlaybackChange(loaded.trackId, audioRef.current.currentTime * 1000, false)
+            }
+          }}
+          onEnded={() => {
+            const loaded = loadedMediaRef.current
+            setIsPlaying(false)
+            if (loaded && audioRef.current) {
+              onPlaybackChange(loaded.trackId, audioRef.current.currentTime * 1000, false)
+            }
+          }}
+          onError={() => {
+            if (!loadedMediaRef.current) return
+            setIsPlaying(false)
+            onPlayerError('Failed to stream audio track over media://')
+          }}
+        />
+
+        <div className="flex w-full flex-1 min-w-0 items-center gap-3">
+          {/* Transport Controls */}
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              type="button"
+              aria-label={isPlaying && loadedTrackId === focusedTrack?.id ? 'Pause' : 'Play'}
+              title={
+                isPlaying && loadedTrackId === focusedTrack?.id
+                  ? 'Pause the preview (keeps the media:// handle open)'
+                  : 'Play the focused track over media:// (seek first with a lyric line)'
+              }
+              disabled={!focusedTrack && !loadedTrackId}
+              onClick={() => void handleTogglePlay()}
+              className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-600 text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isPlaying && (!focusedTrack || loadedTrackId === focusedTrack.id) ? (
+                <Pause className="h-4 w-4" />
+              ) : (
+                <Play className="h-4 w-4 ml-0.5" />
+              )}
+            </button>
+            <button
+              type="button"
+              aria-label="Stop and unload audio"
+              title="Stop and unload the preview to release the Windows file lock"
+              disabled={!loadedTrackId}
+              onClick={stopAndUnload}
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-zinc-700 bg-zinc-800 text-zinc-300 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Square className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {/* Track Title */}
+          <div className="w-52 min-w-0 shrink-0">
+            <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-100 truncate">
+              <Volume2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+              <span className="truncate">
+                {loadedTitle ?? (focusedTrack ? `${focusedTrack.title}${focusedTrack.artist ? ` — ${focusedTrack.artist}` : ''}` : 'Select a track to preview')}
+              </span>
+            </div>
+          </div>
+
+          {/* Scrubber + Time */}
+          <div className="flex flex-1 min-w-0 items-center gap-2">
+            <span className="w-10 text-right font-mono text-[11px] tabular-nums text-zinc-400">
+              {formatDuration(currentTimeSec)}
+            </span>
+            <input
+              type="range"
+              aria-label="Audio seek scrubber"
+              title="Seek within the loaded media:// preview"
+              min={0}
+              max={Math.max(effectiveDuration, 1)}
+              step={0.1}
+              value={Math.min(currentTimeSec, Math.max(effectiveDuration, 1))}
+              disabled={!loadedTrackId}
+              onChange={(event) => handleScrub(Number.parseFloat(event.target.value))}
+              className="h-1.5 min-w-0 w-full flex-1 cursor-pointer accent-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+            />
+            <span className="w-10 shrink-0 font-mono text-[11px] tabular-nums text-zinc-400">
+              {formatDuration(effectiveDuration)}
             </span>
           </div>
-          <div className="min-h-[18px] max-h-[48px] space-y-0.5 overflow-y-auto text-[11px] text-emerald-300/90">
-            {activeLineTexts.length > 0 ? (
-              activeLineTexts.map((text, index) => (
-                <div key={`${index}-${text}`} className="truncate" title={text}>
-                  {text}
-                </div>
-              ))
-            ) : (
-              <div className="truncate">
-                {loadedTrackId ? 'Playing media:// stream' : 'Audio idle'}
-              </div>
-            )}
-          </div>
-        </div>
 
-        <div className="flex flex-1 min-w-0 items-center gap-2">
-          <span className="w-10 text-right font-mono text-[11px] tabular-nums text-zinc-400">
-            {formatDuration(currentTimeSec)}
-          </span>
-          <input
-            type="range"
-            aria-label="Audio seek scrubber"
-            title="Seek within the loaded media:// preview"
-            min={0}
-            max={Math.max(effectiveDuration, 1)}
-            step={0.1}
-            value={Math.min(currentTimeSec, Math.max(effectiveDuration, 1))}
-            disabled={!loadedTrackId}
-            onChange={(event) => handleScrub(Number.parseFloat(event.target.value))}
-            className="h-1.5 min-w-0 w-full flex-1 cursor-pointer accent-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
-          />
-          <span className="w-10 shrink-0 font-mono text-[11px] tabular-nums text-zinc-400">
-            {formatDuration(effectiveDuration)}
-          </span>
-        </div>
-
-        {/*
-          Reserved status slot (non-overlapping, in the dock's flex flow) followed
-          by the quiet TagLib / WASI engine indicator: green when the
-          utility-process tag engine is ready, amber with the error in the
-          tooltip otherwise.
-        */}
-        <div className="flex shrink-0 items-center gap-2">
-          <span
-            role="status"
-            aria-live="polite"
-            title={statusMessage ?? undefined}
-            className={`max-w-[220px] truncate text-[10px] ${
-              statusMessage ? 'text-emerald-300' : 'text-transparent'
-            }`}
-          >
-            {statusMessage ?? ' '}
-          </span>
-          <span
-            title={
-              health?.ready
-                ? `TagLib ${health.taglibVersion ?? 'ready'} (PID ${health.workerPid ?? '?'})`
-                : (health?.error ?? 'Tag engine initializing')
-            }
-            className="flex shrink-0 items-center gap-1 text-[10px] text-zinc-500"
-          >
+          {/* Status Slot */}
+          <div className="flex shrink-0 items-center gap-2">
             <span
-              aria-hidden
-              className={`h-1.5 w-1.5 rounded-full ${
-                health?.ready ? 'bg-emerald-400' : 'bg-amber-400'
-              }`}
-            />
-            TagLib
-          </span>
+              role="status"
+              aria-live="polite"
+              title={statusMessage ?? undefined}
+              className={`max-w-[220px] truncate text-[10px] ${statusMessage ? 'text-emerald-300' : 'text-transparent'}`}
+            >
+              {statusMessage ?? ' '}
+            </span>
+          </div>
         </div>
       </div>
     </footer>

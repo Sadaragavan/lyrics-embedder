@@ -2,10 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { createElement } from 'react'
-import { LyricsEditorPanel } from '../src/renderer/src/components/LyricsEditorPanel'
-import type { TrackRecord, LyricsSearchResult, WorkspaceMode, EditorLayout, LyricsFetchProgress } from '@shared/ipc'
+import { RightPanel } from '../src/renderer/src/components/RightPanel/RightPanel'
+import type { TrackRecord, LyricsSearchResult, WorkspaceMode, LyricsFetchProgress } from '@shared/ipc'
 import type { TrackEmbedStatus } from '../src/renderer/src/types'
-import type { LyricsProviderFilter, AiJobState } from '../src/renderer/src/components/LyricsEditorPanel'
+import type { LyricsProviderFilter, AiJobState } from '@shared/ipc'
 import type { LyricsSource } from '@shared/types'
 
 // Minimal mock track
@@ -38,36 +38,29 @@ const mockSearchResult: LyricsSearchResult = {
 
 const emptyProps = {
   focusedTrack: null as TrackRecord | null,
-  selectedCount: 0,
-  lyricsText: '',
-  hasDraft: false,
-  autoSaveState: 'idle' as const,
+  editorState: null as any,
+  focusedEditorState: null as any,
+  playbackTimeMs: 0,
+  loadedTrackId: null as string | null,
   preserveWordTags: false,
   onPreserveWordTagsChange: vi.fn(),
   onLyricsChange: vi.fn(),
-  fetchProgress: undefined as LyricsFetchProgress | undefined,
-  embedStatus: undefined as TrackEmbedStatus | undefined,
-  workerReady: true,
-  loadedTrackId: null,
-  playbackTimeMs: 0,
+  onTranslationChange: vi.fn(),
+  onRomanizationChange: vi.fn(),
   onSeekToMs: vi.fn(),
   onImportLrc: vi.fn(),
   onRevert: vi.fn(),
   onEmbedFocused: vi.fn(),
   onNormalize: vi.fn(),
   onPreviewTextChange: vi.fn(),
-  mode: 'edit' as WorkspaceMode,
-  onModeChange: vi.fn(),
-  editorLayout: 'live' as EditorLayout,
-  onEditorLayoutChange: vi.fn(),
-  secondaryLayerText: '',
-  onSecondaryLayerChange: vi.fn(),
-  romanizationLayerText: '',
-  onRomanizationLayerChange: vi.fn(),
-  showTranslationLayer: true,
-  onShowTranslationLayerChange: vi.fn(),
-  showRomanizationLayer: true,
-  onShowRomanizationLayerChange: vi.fn(),
+  workerReady: true,
+  embedStatus: undefined as TrackEmbedStatus | undefined,
+  fetchProgress: undefined as LyricsFetchProgress | undefined,
+  aiJob: null as AiJobState | null,
+  onAiGenerate: vi.fn(),
+  onAiCancel: vi.fn(),
+  onOpenSettings: vi.fn(),
+  aiConfigured: false,
   searchTitle: '',
   onSearchTitleChange: vi.fn(),
   searchArtist: '',
@@ -85,22 +78,41 @@ const emptyProps = {
   onLoadAllLayers: vi.fn(),
   providerFilter: 'all' as LyricsProviderFilter,
   onProviderFilterChange: vi.fn(),
-  onOpenSettings: vi.fn(),
-  aiJob: null as AiJobState | null,
-  onAiGenerate: vi.fn(),
-  onAiCancel: vi.fn(),
-  aiConfigured: false
+  showTranslationLayer: true,
+  onShowTranslationLayerChange: vi.fn(),
+  showRomanizationLayer: true,
+  onShowRomanizationLayerChange: vi.fn(),
+  stackedOutput: '',
+  hasTranslation: false,
+  hasRomanization: false,
+  workspaceMode: 'lyrics' as WorkspaceMode,
+  onWorkspaceModeChange: vi.fn()
 }
 
 const trackProps = {
   ...emptyProps,
   focusedTrack: mockTrack,
-  lyricsText: mockTrack.lyrics ?? '',
+  editorState: {
+    trackId: mockTrack.id,
+    primary: mockTrack.lyrics ?? '',
+    translation: { text: '', visible: true },
+    romanization: { text: '', visible: true },
+    dirty: false,
+    saveState: 'idle' as const
+  },
+  focusedEditorState: {
+    trackId: mockTrack.id,
+    primary: mockTrack.lyrics ?? '',
+    translation: { text: '', visible: true },
+    romanization: { text: '', visible: true },
+    dirty: false,
+    saveState: 'idle' as const
+  },
   searchResults: [mockSearchResult],
   searchSearched: true
 }
 
-describe('LyricsEditorPanel hook order stability', () => {
+describe('RightPanel hook order stability', () => {
   let container: HTMLDivElement
   let root: ReturnType<typeof createRoot>
 
@@ -119,7 +131,7 @@ describe('LyricsEditorPanel hook order stability', () => {
   it('renders without error when focusedTrack is null (no track focused)', () => {
     // This should not throw React error #310
     act(() => {
-      root.render(createElement(LyricsEditorPanel, emptyProps))
+      root.render(createElement(RightPanel, emptyProps))
     })
 
     // Should show "No track focused" message
@@ -128,7 +140,7 @@ describe('LyricsEditorPanel hook order stability', () => {
 
   it('renders without error when focusedTrack is provided', () => {
     act(() => {
-      root.render(createElement(LyricsEditorPanel, trackProps))
+      root.render(createElement(RightPanel, trackProps))
     })
 
     // Should show the track title
@@ -138,14 +150,14 @@ describe('LyricsEditorPanel hook order stability', () => {
   it('transitions from no-track to track-focused without hook-order error (#310)', () => {
     // First render: no track focused
     act(() => {
-      root.render(createElement(LyricsEditorPanel, emptyProps))
+      root.render(createElement(RightPanel, emptyProps))
     })
     expect(container.textContent).toContain('No track focused')
 
     // Second render: track focused (simulates user clicking a track)
     // This transition must not change hook call order between renders
     act(() => {
-      root.render(createElement(LyricsEditorPanel, trackProps))
+      root.render(createElement(RightPanel, trackProps))
     })
     expect(container.textContent).toContain('Test Song')
   })
@@ -153,13 +165,13 @@ describe('LyricsEditorPanel hook order stability', () => {
   it('transitions from track-focused to no-track without hook-order error', () => {
     // First render: track focused
     act(() => {
-      root.render(createElement(LyricsEditorPanel, trackProps))
+      root.render(createElement(RightPanel, trackProps))
     })
     expect(container.textContent).toContain('Test Song')
 
     // Second render: no track focused (simulates clearing selection)
     act(() => {
-      root.render(createElement(LyricsEditorPanel, emptyProps))
+      root.render(createElement(RightPanel, emptyProps))
     })
     expect(container.textContent).toContain('No track focused')
   })
@@ -169,7 +181,7 @@ describe('LyricsEditorPanel hook order stability', () => {
     for (let i = 0; i < 5; i++) {
       const props = i % 2 === 0 ? trackProps : emptyProps
       act(() => {
-        root.render(createElement(LyricsEditorPanel, props))
+        root.render(createElement(RightPanel, props))
       })
     }
     // Final state should be track-focused
@@ -177,27 +189,14 @@ describe('LyricsEditorPanel hook order stability', () => {
   })
 
   it('switches workspace modes without hook-order error', () => {
-    const modes: WorkspaceMode[] = ['edit', 'layers', 'find']
+    const modes: WorkspaceMode[] = ['lyrics', 'text', 'find']
     act(() => {
-      root.render(createElement(LyricsEditorPanel, trackProps))
+      root.render(createElement(RightPanel, trackProps))
     })
 
     for (const mode of modes) {
       act(() => {
-        root.render(createElement(LyricsEditorPanel, { ...trackProps, mode }))
-      })
-    }
-  })
-
-  it('switches editor layout without hook-order error', () => {
-    const layouts: EditorLayout[] = ['live', 'raw']
-    act(() => {
-      root.render(createElement(LyricsEditorPanel, trackProps))
-    })
-
-    for (const layout of layouts) {
-      act(() => {
-        root.render(createElement(LyricsEditorPanel, { ...trackProps, editorLayout: layout }))
+        root.render(createElement(RightPanel, { ...trackProps, workspaceMode: mode }))
       })
     }
   })
@@ -205,12 +204,12 @@ describe('LyricsEditorPanel hook order stability', () => {
   it('handles provider filter changes without hook-order error', () => {
     const filters: LyricsProviderFilter[] = ['all', 'lrclib', 'netease', 'localSidecar']
     act(() => {
-      root.render(createElement(LyricsEditorPanel, trackProps))
+      root.render(createElement(RightPanel, trackProps))
     })
 
     for (const filter of filters) {
       act(() => {
-        root.render(createElement(LyricsEditorPanel, { ...trackProps, providerFilter: filter }))
+        root.render(createElement(RightPanel, { ...trackProps, providerFilter: filter }))
       })
     }
   })

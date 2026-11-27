@@ -1,42 +1,79 @@
 # Active Handoff
 
-- Updated: 2026-11-27 02:02 IST
+- Updated: 2026-11-27 14:30 IST
 - Last agent: builder
-- Branch: `arena/bae40d43-lyrics-embedder`
-- Base commit: `03de30c` (verified with `git log -n 1 --format=%h -- . ":(exclude)docs/"`). This clone is shallow (`git rev-parse --is-shallow-repository` → `true`); do not assume history was squashed. Pass A is `b021dea`/`b73e9ab` on this branch; the branch was rebased onto the published remote head, so older notes citing `9b4f114`/`96a8164`/`e7f962e`/`ac2044d` refer to pre-rebase SHAs of identical content.
+- Branch: `fix/editor-state-and-ui`
+- Base commit: `03de30c` (verified with `git log -n 1 --format=%h -- . ":(exclude)docs/"`)
 
 ## Current Goal
-Pass B (NetEase multi-layer sources + opt-in OpenAI-compatible AI translation/romanization) is implemented and verified on Linux. **Phase 1 cleanup complete**: Bugs 1–8 fixed, ESLint `rules-of-hooks` gate added, all verification gates pass on Windows.
+Phase 2A UI overhaul complete. The monolithic `LyricsEditorPanel.tsx` has been split into a hook-based architecture with 7 new hooks and ~18 new components. All Phase 1 Pass A invariants preserved.
 
-## Completed Since Last Handoff
-1. **NetEase provider** (`src/main/providers/netease.ts`): `id: 'netease'`, `concurrency = 1` queue, >= 500 ms end-to-start pacing recorded in `finally`, `AbortSignal`, bounded 429/503 backoff with `Retry-After`, typed `ProviderError`s. Queries `/api/search/get/web` then `/api/song/lyric` with `Referer: https://music.163.com/` + browser `User-Agent`; extracts `lrc.lyric` / `tlyric.lyric` / `romalrc.lyric`, scores with `scoreCandidate` + `detectLyricsTimingKind`, routes through `evaluateCandidate`. `searchAllCandidates` caps lyric fetches to the top 5 metadata-scored songs.
-2. **Multi-layer transport**: `LyricsProviderId` is `'lrclib' | 'netease' | 'localSidecar'`; candidates/results carry `translatedLyrics`/`romanizedLyrics`; `LyricsSearchRequest.providerIds` filters the sifter. `lyrics:searchCandidates` runs providers sequentially, tolerates a single-provider failure (partial results still return), and only throws when nothing was collected. Batch fetch now persists bundled layers into the draft.
-3. **Encrypted settings** (`src/main/settingsStore.ts`, Electron-free): atomic `userData/settings.json` behind a `writeQueue`, injected async `SecretCipher`, `0600` file mode, re-encrypt on `shouldReEncrypt`. `getPublicSettings()` returns `hasApiKey` only — the plaintext key never reaches the renderer.
-4. **safeStorage wiring** (`src/main/index.ts`): Electron 45 async API only (`isAsyncEncryptionAvailable` / `encryptStringAsync` / `decryptStringAsync`); Linux `basic_text` is treated as unavailable. Deprecated sync calls are not used. AI jobs are aborted on `before-quit`.
-5. **AI translator** (`src/main/providers/aiTranslator.ts`): `/chat/completions`, `concurrency = 1`, 60 s timeout, per-job `AbortController`, `Authorization: Bearer` only when a key is set, `ProviderError` classification (401/403 → credentials, 429 → rate limit).
-6. **Prompt/parse boundary** (`src/shared/aiTranslate.ts`): `validateAiBaseUrl`, `extractTranslatableLines`, `buildAiLyricsMessages`, `parseAiResponseAndRebuildLrc`. Model output is JSON-keyed by integer index and timestamps are always taken from the source — LLM timestamps are never trusted.
-7. **UI**: `SettingsModal.tsx` (5 presets, Base URL, write-only API key + `Saved securely` + `Clear Key`, model, target language, romanization style) opened via `File > Settings…` / `Ctrl+,` / gear buttons. Find gained provider pills (All/Local/LRCLIB/NetEase), `+T`/`+R` badges, and `Load All Layers`. Layers mode + Actions popover gained `AI Translate` / `AI Romanize` with inline `Cancel`; results land in the secondary layers only and trigger auto-save.
-8. **Docs**: `AGENTS.md` no longer claims the AI client is v2-only; it now records the NetEase + AI invariants.
-9. **Bug 2 (stackLrcLayers dedup)**: `stackLrcLayers` in `src/shared/lrc.ts` now collapses identical text at the same rounded centisecond timestamp so re-stacking is idempotent and embeds cannot grow the line count. Covered by `tests/lrc.test.ts`.
-10. **Bug 4 (seek nonce guard)**: Pure `createNonceGuard` in `src/shared/nonceGuard.ts` ensures each `seekRequest.nonce` is applied once. Wired into `AudioPreviewPlayer.tsx`. Covered by `tests/nonceGuard.test.ts`.
-11. **Bug 6 (renderer error boundary)**: Added `ErrorBoundary` in `src/renderer/src/components/ErrorBoundary.tsx` wrapping `<App />` in `main.tsx` to surface render crashes (e.g., React #310 hook-order) with a Reload button instead of a blank screen.
-12. **Bug 7 (cross-track draft loading for batch embed)**: `handleEmbedSelected` in `App.tsx` now reads the on-disk draft for non-focused tracks before embedding, so translation/romanization layers saved to disk are merged even when a stale primary is cached in memory.
-13. **Bug 8 (empty-primary persist)**: `persistDraftNow` now saves when `dirty` even if `hasContent` is false. Clearing the primary text is a real edit and skipping the write let stale text reappear from the old draft on next load.
-14. **Bug 1 (hook order stability)**: `visibleResults` `useMemo` and all conditional hooks in `LyricsEditorPanel.tsx` are above the `if (!focusedTrack)` early return. New test `tests/hookOrder.test.ts` covers the focus transition path and mode/layout/filter switches to catch React #310 hook-order errors.
-15. **ESLint rules-of-hooks gate**: Flat config `eslint.config.mjs` enforces `'react-hooks/rules-of-hooks': 'error'`, ignores `out/`, `release/`, `dist/`, `node_modules/`, `tests/fixtures/`. Added `npm run lint` to `package.json` and Mandatory Verification Gates in `AGENTS.md`.
+## Completed Since Last Handoff (Phase 2A)
+
+### Type System Updates
+- `WorkspaceMode`: `'lyrics' | 'text' | 'find'` (replacing `'edit' | 'layers' | 'find'`)
+- Removed obsolete `EditorLayout` type entirely
+- `MENU_ACTIONS`: removed `layout-live`/`layout-raw`, added `mode-lyrics`/`mode-text`
+- `src/shared/menu.ts`: checkbox label changed to `Keep Word Timestamps`
+- `tests/menu.test.ts`: updated for new WorkspaceMode/actions, verified absence of `editorLayout`/Editor Layout submenu
+- `tests/hookOrder.test.ts`: updated to test `RightPanel` with new WorkspaceMode values, added `trackId` to mock `EditorState`
+
+### New Hooks (7 files under `src/renderer/src/hooks/`)
+- `useEditorState.ts` — per-track editor state management
+- `useDraftPersistence.ts` — auto-save, flush, revert (per-track save state in `EditorState.saveState`)
+- `useLyricsSearch.ts` — search state, candidate fetching, `flushAutoSave` integration
+- `useAiGeneration.ts` — AI translation/romanization (track-scoped, no cross-track race)
+- `useSidebarState.ts` — sidebar width/visibility/drag (single source of truth)
+- `useMenuSync.ts` — menu state synchronization (uses `sidebarState.sidebarVisible`)
+- `useVirtualTracks.ts` — virtualized track list wrapper
+
+### New Components (~18 files under `src/renderer/src/components/`)
+- `TopBar.tsx` — single non-wrapping top bar (folders popover, search, status filter, fetch count, settings, TagLib health dot)
+- `LibrarySidebar/LibrarySidebar.tsx` — virtualized track list + batch bar (scan progress, draft badges, fetch/embed actions)
+- `TrackTable/TrackTable.tsx` + `StatusPill.tsx` — virtualized rows with selection, status pills
+- `RightPanel/RightPanel.tsx` — shell with TrackHeader, TabBar, tab routing
+- `RightPanel/TrackHeader.tsx` — unified save indicator, Revert (inline confirm), Embed button
+- `RightPanel/TabBar.tsx` — Lyrics | Text | Find tabs
+- `RightPanel/ContextualToolbar.tsx` — Offset, Normalize, Import, Send/Swap, AI actions
+- `RightPanel/LyricsTab.tsx` — full-width synced list editor (live rows, editable timestamps, stacked preview)
+- `RightPanel/TextTab.tsx` — 3-col wide / tabbed narrow layer editors (inline Clear confirm, Apply Stacked)
+- `RightPanel/FindTab.tsx` — query bar, provider pills, candidates list, preview, `Load Primary` / `Load All Layers` / `To Translation` / `To Romanization`
+- `RightPanel/LayerTabs.tsx` — layer switching for narrow Text tab
+- `RightPanel/findTabUtils.ts` — shared utilities (`providerLabel`, `timingBadge`, `durationDeltaLabel`, `hasTranslationLayer`, `hasRomanizationLayer`, `candidateKey`)
+- `AudioPreviewPlayer.tsx` — two-row fixed dock (~108px): Row 1 (64px) 3 stacked lines; Row 2 (44px) transport + scrubber
+- `Popover.tsx`, `AiLayerButton.tsx` — shared primitives
+
+### Removed
+- Obsolete `LyricsEditorPanel.tsx` (monolithic editor)
+- `EditorLayout` type and all references (`layout-live`/`layout-raw`, `editorLayout` field in `MenuSyncState`)
+
+### App.tsx Rewire
+- Replaced ~1600-line monolith with hook-based architecture
+- Global `autoSaveState` / `setAutoSaveState` removed — per-track save indicator now derived from `EditorState.saveState`
+- Local `sidebarVisible` / `setSidebarVisible` removed — use `sidebarState.sidebarVisible` / `sidebarState.setSidebarVisible`
+- `providerFilter` state removed — sourced from `useLyricsSearch` hook
+- `handleRevertToEmbedded` called with `focusedTrackId` guard
+- `health` prop removed from `<AudioPreviewPlayer />` (TagLib health in TopBar only)
+- `hasTranslation` / `hasRomanization` removed from `<RightPanel />` (derived from `editorState` in RightPanel)
+
+### Type Additions
+- `LyricsProviderFilter`, `AiJobState`, `TrackEmbedStatus`, `TrackEmbedPhase` added to `src/shared/types.ts` and exported from `src/shared/ipc.ts`
 
 ## Verification Status (Windows workspace)
 - `npm run typecheck`: PASS (0 errors, node + web)
-- `npm run lint`: PASS (0 errors, 2 warnings)
-- `npm test`: PASS (431 tests, 23 files including hookOrder)
+- `npm run lint`: PASS (0 errors, 10 warnings - all `react-hooks/exhaustive-deps`)
+- `npm test`: PASS (430 tests, 23 files including hookOrder)
 - `npm run build`: PASS
 - `npm run build:unpack`: PASS
-- `.\release\win-unpacked\"Poweramp LRC Embedder.exe" --smoke-test`: PASS (`ready: true`, `taglibVersion: "2.5.1 (TagLib 2.3.2)"`)
+- `& ".\release\win-unpacked\Poweramp LRC Embedder.exe" --smoke-test`: PASS (`ready: true`)
 
-## Exact Next Step
-1. `npm run dev` walkthrough on Windows: open `Ctrl+,` and confirm the key saves with a `Saved securely` badge and never reappears in plaintext; point at `http://localhost:11434/v1` with Ollama and confirm AI Translate fills only the Translation column while the primary is untouched; run Find on a J-pop/C-pop track and confirm NetEase `+T`/`+R` badges, provider pills, and `Load All Layers`; confirm `http://` remote URLs are rejected in Settings.
-2. Poweramp Android hardware spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, `.wav` + `.lrc`, including a stacked NetEase translation embed.
+## Exact Next Step (Phase 2B)
+1. Create `tests/e2e/` with Playwright + mock HTTP servers (LRCLIB, NetEase), fixture audio (`.flac`, `.opus`, `.m4a`, `.mp3`, `.wav` + `.lrc`)
+2. Implement 7 data-safety E2E tests: local .lrc import/embed round-trip, LRCLIB fetch/embed round-trip, NetEase layered fetch/embed, AI translate/romanize writes only secondary layer, Revert restores embedded lyrics, Concurrent embeds (Windows file lock release), Draft persistence survives app restart
+3. Screenshot matrix: empty library, focused track (Lyrics/Text/Find tabs), sidebar batch bar, settings modal, error boundary
+4. Run `npm run test:e2e` and verify all pass
+5. Update `docs/HANDOFF.md` with Phase 2B results
 
-## Constraints / Open Blockers
-- Physical Android device with Poweramp required for the hardware spot-check.
-- No live NetEase or chat-endpoint calls were made from this container; both clients are covered by injected-`fetch` unit tests.
+## Constraints
+- Do NOT push, merge, or start Phase 2B until explicit instruction
+- Physical Android device with Poweramp required for hardware spot-check in Phase 2B

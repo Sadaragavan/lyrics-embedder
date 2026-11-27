@@ -22,12 +22,10 @@ describe('MenuSyncState sanitization', () => {
     const state = sanitizeMenuSyncState({
       selectedCount: -5,
       mode: 'not-a-mode',
-      editorLayout: 'not-a-layout',
       hasFocusedTrack: 'yes'
     } as unknown as MenuSyncState)
     expect(state.selectedCount).toBe(0)
-    expect(state.mode).toBe('edit')
-    expect(state.editorLayout).toBe('live')
+    expect(state.mode).toBe('lyrics')
     expect(state.hasFocusedTrack).toBe(false)
   })
 
@@ -47,8 +45,7 @@ describe('MenuSyncState sanitization', () => {
       workerReady: true,
       preserveWordTags: true,
       sidebarVisible: false,
-      mode: 'layers',
-      editorLayout: 'raw',
+      mode: 'text',
       isPlaying: true,
       canPlay: true,
       canStop: true,
@@ -75,9 +72,8 @@ describe('menuStateEquals', () => {
       { workerReady: true },
       { preserveWordTags: true },
       { sidebarVisible: false },
-      { mode: 'layers' },
+      { mode: 'text' },
       { mode: 'find' },
-      { editorLayout: 'raw' },
       { isPlaying: true },
       { canPlay: true },
       { canStop: true },
@@ -100,6 +96,9 @@ describe('isMenuAction', () => {
     expect(isMenuAction('embed-current-track')).toBe(true)
     expect(isMenuAction('toggle-preserve-word-tags')).toBe(true)
     expect(isMenuAction('show-tag-engine-status')).toBe(true)
+    expect(isMenuAction('mode-lyrics')).toBe(true)
+    expect(isMenuAction('mode-text')).toBe(true)
+    expect(isMenuAction('mode-find')).toBe(true)
     expect(isMenuAction('not-a-real-action')).toBe(false)
     expect(isMenuAction(undefined)).toBe(false)
     expect(isMenuAction(null)).toBe(false)
@@ -116,8 +115,7 @@ describe('Menu template structure', () => {
     workerReady: true,
     preserveWordTags: false,
     sidebarVisible: true,
-    mode: 'edit',
-    editorLayout: 'live',
+    mode: 'lyrics',
     isPlaying: false,
     canPlay: true,
     canStop: false,
@@ -185,7 +183,7 @@ describe('Menu template structure', () => {
     expect(revert2?.enabled).toBe(false)
   })
 
-  it('Edit has normalize Ctrl+Shift+N and preserve checkbox', () => {
+  it('Edit has normalize Ctrl+Shift+N and Keep Word Timestamps checkbox', () => {
     const template = buildMenuTemplate(state)
     const edit = template.find((item) => item.label === 'Edit')!
     const accelerators = collectAccelerators(edit.submenu ?? [])
@@ -193,9 +191,10 @@ describe('Menu template structure', () => {
     const preserveItem = edit.submenu!.find((item) => item.action === 'toggle-preserve-word-tags')
     expect(preserveItem?.type).toBe('checkbox')
     expect(preserveItem?.checked).toBe(false)
+    expect(preserveItem?.label).toBe('Keep Word Timestamps')
   })
 
-  it('View has sidebar Ctrl+B checkbox, mode radios Ctrl+1/2/3, layout radios, DevTools', () => {
+  it('View has sidebar Ctrl+B checkbox, mode radios Ctrl+1/2/3, no Editor Layout submenu, DevTools', () => {
     const template = buildMenuTemplate(state)
     const view = template.find((item) => item.label === 'View')!
     const accelerators = collectAccelerators(view.submenu ?? [])
@@ -208,17 +207,21 @@ describe('Menu template structure', () => {
     expect(sidebarItem?.type).toBe('checkbox')
     expect(sidebarItem?.checked).toBe(true)
 
-    const editMode = view.submenu!.find((item) => item.action === 'mode-edit')
-    expect(editMode?.type).toBe('radio')
-    expect(editMode?.checked).toBe(true)
+    const lyricsMode = view.submenu!.find((item) => item.action === 'mode-lyrics')
+    expect(lyricsMode?.type).toBe('radio')
+    expect(lyricsMode?.checked).toBe(true)
 
-    const layersMode = view.submenu!.find((item) => item.action === 'mode-layers')
-    expect(layersMode?.type).toBe('radio')
-    expect(layersMode?.checked).toBe(false)
+    const textMode = view.submenu!.find((item) => item.action === 'mode-text')
+    expect(textMode?.type).toBe('radio')
+    expect(textMode?.checked).toBe(false)
 
-    const layoutSub = view.submenu!.find((item) => item.label === 'Editor Layout')!
-    const layoutItems = layoutSub.submenu!.map((item) => item.action)
-    expect(layoutItems).toEqual(['layout-live', 'layout-raw'])
+    const findMode = view.submenu!.find((item) => item.action === 'mode-find')
+    expect(findMode?.type).toBe('radio')
+    expect(findMode?.checked).toBe(false)
+
+    // Editor Layout submenu should no longer exist
+    const layoutSub = view.submenu!.find((item) => item.label === 'Editor Layout')
+    expect(layoutSub).toBeUndefined()
 
     const devTools = view.submenu!.find((item) => item.role === 'toggleDevTools')
     expect(devTools).toBeDefined()
