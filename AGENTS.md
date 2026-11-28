@@ -20,9 +20,10 @@ Read `docs/ARCHITECTURE.md`, `docs/PROGRESS.md`, and `docs/HANDOFF.md` before pl
 ## Mandatory Verification Gates
 OpenCode V2 does not run LSP diagnostics. Run these commands before finishing changes:
 1. `npm run typecheck` (`tsc --noEmit -p tsconfig.node.json` and `tsconfig.web.json`) — must pass with 0 errors.
-2. `npm test` (`vitest run`) — must pass all unit and tag fixture tests.
-3. `npm run build` (`electron-vite build`) — must succeed cleanly.
-4. `npm run build:unpack` (`electron-builder --dir --publish never`) — required whenever modifying `audioWorker.ts`, `wasmUrl` resolution, `asarUnpack`, `electron.vite.config.ts`, or `electron-builder.yml` to verify packaged WASI `.wasm` loading on Windows.
+2. `npm run lint` (`eslint .`) — must pass with 0 errors (`react-hooks/rules-of-hooks` is `error`).
+3. `npm test` (`vitest run`) — must pass all unit and tag fixture tests.
+4. `npm run build` (`electron-vite build`) — must succeed cleanly.
+5. `npm run build:unpack` (`electron-builder --dir --publish never`) — required whenever modifying `audioWorker.ts`, `wasmUrl` resolution, `asarUnpack`, `electron.vite.config.ts`, or `electron-builder.yml` to verify packaged WASI `.wasm` loading on Windows.
 
 ## Rules That Are Easy to Break
 

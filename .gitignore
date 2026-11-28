@@ -6,3 +6,6 @@ dist/
 .env
 .env.local
 *.lrcembed.*.tmp.*
+tests/e2e/screenshots/
+tests/e2e/test-results/
+playwright-report/

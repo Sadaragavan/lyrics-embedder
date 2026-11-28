@@ -199,6 +199,26 @@ export interface LyricsProvider {
 
 export type LyricsFetchPhase = 'idle' | 'fetching' | 'done' | 'error' | 'cancelled'
 
+/** Which lyric provider(s) the user wants to search. */
+export type LyricsProviderFilter = 'all' | 'lrclib' | 'netease' | 'localSidecar'
+
+/** In-flight AI generation job for a track's translation or romanization layer. */
+export interface AiJobState {
+  mode: 'translation' | 'romanization'
+  jobId: string
+}
+
+/** Phase of an embed operation for a single track. */
+export type TrackEmbedPhase = 'idle' | 'embedding' | 'verified' | 'error'
+
+/** Status of an embed operation for a single track. */
+export interface TrackEmbedStatus {
+  phase: TrackEmbedPhase
+  targetPath?: string
+  lyricsSource?: Exclude<LyricsSource, 'none'>
+  error?: string
+}
+
 // --- Phase 5: Native menu + dynamic workspace ---
 
 /** Every actionable command a native menu item can dispatch to the renderer. */
@@ -213,11 +233,9 @@ export const MENU_ACTIONS = [
   'send-primary-to-translation',
   'send-primary-to-romanization',
   'toggle-sidebar',
-  'mode-edit',
-  'mode-layers',
+  'mode-lyrics',
+  'mode-text',
   'mode-find',
-  'layout-raw',
-  'layout-live',
   'toggle-play-pause',
   'stop-and-unload',
   'open-settings',
@@ -232,14 +250,13 @@ export function isMenuAction(value: unknown): value is MenuAction {
   return typeof value === 'string' && (MENU_ACTIONS as readonly string[]).includes(value)
 }
 
-/** Right-workspace mode selected from the View menu or the in-app mode bar. */
-export type WorkspaceMode = 'edit' | 'layers' | 'find'
-
 /**
- * Edit-mode layout selected from the View > Editor Layout submenu.
- * `live` is the unified editable synced view; `raw` is plain monospace LRC text.
+ * Right-workspace tab selected from the View menu or the in-app tab bar.
+ * 'lyrics' = full-width synced list editor (formerly 'edit' + 'live' layout)
+ * 'text' = three-column / tabbed layer editors (formerly 'layers' + 'raw' layout)
+ * 'find' = candidate search and preview (formerly 'find')
  */
-export type EditorLayout = 'live' | 'raw'
+export type WorkspaceMode = 'lyrics' | 'text' | 'find'
 
 /**
  * Renderer-owned menu state. The main process rebuilds the native menu from
@@ -254,7 +271,6 @@ export interface MenuSyncState {
   preserveWordTags: boolean
   sidebarVisible: boolean
   mode: WorkspaceMode
-  editorLayout: EditorLayout
   isPlaying: boolean
   canPlay: boolean
   canStop: boolean

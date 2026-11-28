@@ -7,7 +7,6 @@
  */
 
 import type {
-  EditorLayout,
   MenuAction,
   MenuSyncState,
   WorkspaceMode
@@ -18,7 +17,6 @@ export {
   MENU_ACTIONS,
   type MenuAction,
   type MenuSyncState,
-  type EditorLayout,
   type WorkspaceMode
 } from './types'
 
@@ -62,8 +60,7 @@ export const DEFAULT_MENU_SYNC_STATE: Readonly<MenuSyncState> = Object.freeze({
   workerReady: false,
   preserveWordTags: false,
   sidebarVisible: true,
-  mode: 'edit',
-  editorLayout: 'live',
+  mode: 'lyrics',
   isPlaying: false,
   canPlay: false,
   canStop: false,
@@ -71,8 +68,7 @@ export const DEFAULT_MENU_SYNC_STATE: Readonly<MenuSyncState> = Object.freeze({
   embedding: false
 })
 
-const WORKSPACE_MODES: readonly WorkspaceMode[] = ['edit', 'layers', 'find']
-const EDITOR_LAYOUTS: readonly EditorLayout[] = ['live', 'raw']
+const WORKSPACE_MODES: readonly WorkspaceMode[] = ['lyrics', 'text', 'find']
 const MAX_SELECTED_COUNT = 100_000
 
 function asBoolean(value: unknown): boolean {
@@ -88,12 +84,6 @@ function asWorkspaceMode(value: unknown): WorkspaceMode {
   return WORKSPACE_MODES.includes(value as WorkspaceMode)
     ? (value as WorkspaceMode)
     : DEFAULT_MENU_SYNC_STATE.mode
-}
-
-function asEditorLayout(value: unknown): EditorLayout {
-  return EDITOR_LAYOUTS.includes(value as EditorLayout)
-    ? (value as EditorLayout)
-    : DEFAULT_MENU_SYNC_STATE.editorLayout
 }
 
 /**
@@ -113,7 +103,6 @@ export function menuStateEquals(a: MenuSyncState, b: MenuSyncState): boolean {
     a.preserveWordTags === b.preserveWordTags &&
     a.sidebarVisible === b.sidebarVisible &&
     a.mode === b.mode &&
-    a.editorLayout === b.editorLayout &&
     a.isPlaying === b.isPlaying &&
     a.canPlay === b.canPlay &&
     a.canStop === b.canStop &&
@@ -141,7 +130,6 @@ export function sanitizeMenuSyncState(input: unknown): MenuSyncState {
     preserveWordTags: asBoolean(candidate.preserveWordTags),
     sidebarVisible: asBoolean(candidate.sidebarVisible),
     mode: asWorkspaceMode(candidate.mode),
-    editorLayout: asEditorLayout(candidate.editorLayout),
     isPlaying: asBoolean(candidate.isPlaying),
     canPlay: asBoolean(candidate.canPlay),
     canStop: asBoolean(candidate.canStop),
@@ -244,7 +232,7 @@ export function buildMenuTemplate(state: MenuSyncState): MenuTemplateItem[] {
           enabled: hasText
         }),
         {
-          label: 'Preserve A2 <mm:ss.xx> Tags',
+          label: 'Keep Word Timestamps',
           id: 'toggle-preserve-word-tags',
           action: 'toggle-preserve-word-tags',
           type: 'checkbox',
@@ -280,48 +268,28 @@ export function buildMenuTemplate(state: MenuSyncState): MenuTemplateItem[] {
         },
         { type: 'separator' },
         {
-          label: 'Edit Mode',
-          id: 'mode-edit',
-          action: 'mode-edit',
+          label: 'Lyrics',
+          id: 'mode-lyrics',
+          action: 'mode-lyrics',
           type: 'radio',
           accelerator: 'Ctrl+1',
-          checked: state.mode === 'edit'
+          checked: state.mode === 'lyrics'
         },
         {
-          label: 'Layers Mode',
-          id: 'mode-layers',
-          action: 'mode-layers',
+          label: 'Text',
+          id: 'mode-text',
+          action: 'mode-text',
           type: 'radio',
           accelerator: 'Ctrl+2',
-          checked: state.mode === 'layers'
+          checked: state.mode === 'text'
         },
         {
-          label: 'Find Lyrics Mode',
+          label: 'Find',
           id: 'mode-find',
           action: 'mode-find',
           type: 'radio',
           accelerator: 'Ctrl+3',
           checked: state.mode === 'find'
-        },
-        { type: 'separator' },
-        {
-          label: 'Editor Layout',
-          submenu: [
-            {
-              label: 'Live Editor',
-              id: 'layout-live',
-              action: 'layout-live',
-              type: 'radio',
-              checked: state.editorLayout === 'live'
-            },
-            {
-              label: 'Raw LRC Text',
-              id: 'layout-raw',
-              action: 'layout-raw',
-              type: 'radio',
-              checked: state.editorLayout === 'raw'
-            }
-          ]
         },
         { type: 'separator' },
         { label: 'Toggle DevTools', role: 'toggleDevTools' }

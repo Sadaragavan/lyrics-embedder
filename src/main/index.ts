@@ -1384,8 +1384,16 @@ async function initializePersistence(): Promise<void> {
 }
 
 function initializeLyricsFetchQueue(): void {
-  lrclibProvider = new LrclibProvider()
-  neteaseProvider = new NeteaseProvider()
+  // Allow E2E tests to override base URLs via environment variables
+  const lrclibBaseUrl = process.env.LRCLIB_BASE_URL
+  const neteaseBaseUrl = process.env.NETEASE_BASE_URL
+
+  lrclibProvider = new LrclibProvider({
+    ...(lrclibBaseUrl ? { baseUrl: lrclibBaseUrl } : {})
+  })
+  neteaseProvider = new NeteaseProvider({
+    ...(neteaseBaseUrl ? { baseUrl: neteaseBaseUrl } : {})
+  })
   localSidecarProvider = createLocalSidecarProvider()
   aiTranslator = createAiTranslator()
   lyricsFetchQueue = createLyricsFetchQueue({

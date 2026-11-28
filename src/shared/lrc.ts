@@ -285,13 +285,27 @@ export function normalizeLrc(raw: string, options: ParseLrcOptions & FormatLrcOp
  * same timestamp (same-timestamp multi-line stacking for translations/romanization).
  */
 export function stackLrcLayers(layers: string[], options: ParseLrcOptions & FormatLrcOptions = {}): string {
+  const { preserveWordTags = false } = options
   const allLines: LrcLine[] = []
   for (const layer of layers) {
     allLines.push(...parseLrc(layer, options))
   }
   // Compare by rounded centiseconds so lines mapping to the same [mm:ss.xx] stay in layer order.
   allLines.sort((a, b) => Math.round(a.timeMs / 10) - Math.round(b.timeMs / 10))
-  return formatLrc(allLines, options)
+  // Collapse exact duplicates: a line with the same centisecond timestamp AND the
+  // same emitted text must appear once. Re-stacking an already-stacked payload is
+  // therefore idempotent and repeated embeds cannot grow the line count. Identical
+  // text at different timestamps is preserved.
+  const seen = new Set<string>()
+  const deduped: LrcLine[] = []
+  for (const line of allLines) {
+    const emittedText = preserveWordTags ? line.text : stripWordTags(line.text)
+    const key = `${Math.round(line.timeMs / 10)}\u0000${emittedText}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    deduped.push(line)
+  }
+  return formatLrc(deduped, options)
 }
 
 /**

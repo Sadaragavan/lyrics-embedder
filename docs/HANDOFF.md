@@ -1,35 +1,42 @@
 # Active Handoff
 
-- Updated: 2026-11-26 19:05 IST
+- Updated: 2026-11-28 15:30 IST
 - Last agent: builder
-- Branch: `arena/bae40d43-lyrics-embedder`
-- Base commit: `213da83` (verified with `git log -n 1 --format=%h -- . ":(exclude)docs/"`). This clone is shallow (`git rev-parse --is-shallow-repository` → `true`); do not assume history was squashed. Pass A is `b021dea`/`b73e9ab` on this branch; the branch was rebased onto the published remote head, so older notes citing `9b4f114`/`96a8164`/`e7f962e`/`ac2044d` refer to pre-rebase SHAs of identical content.
+- Branch: `fix/editor-state-and-ui`
+- Base commit: `d7c0aa4` (verified with `git log -n 1 --format=%h -- . ":(exclude)docs/"`)
 
-## Current Goal
-Pass B (NetEase multi-layer sources + opt-in OpenAI-compatible AI translation/romanization) is implemented and verified on Linux. Remaining: Windows packaging + `--smoke-test`, interactive desktop walkthrough, Poweramp Android hardware spot-check.
+## Completed Since Last Handoff (Phase 2A + 2B)
 
-## Completed Since Last Handoff
-1. **NetEase provider** (`src/main/providers/netease.ts`): `id: 'netease'`, `concurrency = 1` queue, >= 500 ms end-to-start pacing recorded in `finally`, `AbortSignal`, bounded 429/503 backoff with `Retry-After`, typed `ProviderError`s. Queries `/api/search/get/web` then `/api/song/lyric` with `Referer: https://music.163.com/` + browser `User-Agent`; extracts `lrc.lyric` / `tlyric.lyric` / `romalrc.lyric`, scores with `scoreCandidate` + `detectLyricsTimingKind`, routes through `evaluateCandidate`. `searchAllCandidates` caps lyric fetches to the top 5 metadata-scored songs.
-2. **Multi-layer transport**: `LyricsProviderId` is `'lrclib' | 'netease' | 'localSidecar'`; candidates/results carry `translatedLyrics`/`romanizedLyrics`; `LyricsSearchRequest.providerIds` filters the sifter. `lyrics:searchCandidates` runs providers sequentially, tolerates a single-provider failure (partial results still return), and only throws when nothing was collected. Batch fetch now persists bundled layers into the draft.
-3. **Encrypted settings** (`src/main/settingsStore.ts`, Electron-free): atomic `userData/settings.json` behind a `writeQueue`, injected async `SecretCipher`, `0600` file mode, re-encrypt on `shouldReEncrypt`. `getPublicSettings()` returns `hasApiKey` only — the plaintext key never reaches the renderer.
-4. **safeStorage wiring** (`src/main/index.ts`): Electron 45 async API only (`isAsyncEncryptionAvailable` / `encryptStringAsync` / `decryptStringAsync`); Linux `basic_text` is treated as unavailable. Deprecated sync calls are not used. AI jobs are aborted on `before-quit`.
-5. **AI translator** (`src/main/providers/aiTranslator.ts`): `/chat/completions`, `concurrency = 1`, 60 s timeout, per-job `AbortController`, `Authorization: Bearer` only when a key is set, `ProviderError` classification (401/403 → credentials, 429 → rate limit).
-6. **Prompt/parse boundary** (`src/shared/aiTranslate.ts`): `validateAiBaseUrl`, `extractTranslatableLines`, `buildAiLyricsMessages`, `parseAiResponseAndRebuildLrc`. Model output is JSON-keyed by integer index and timestamps are always taken from the source — LLM timestamps are never trusted.
-7. **UI**: `SettingsModal.tsx` (5 presets, Base URL, write-only API key + `Saved securely` + `Clear Key`, model, target language, romanization style) opened via `File > Settings…` / `Ctrl+,` / gear buttons. Find gained provider pills (All/Local/LRCLIB/NetEase), `+T`/`+R` badges, and `Load All Layers`. Layers mode + Actions popover gained `AI Translate` / `AI Romanize` with inline `Cancel`; results land in the secondary layers only and trigger auto-save.
-8. **Docs**: `AGENTS.md` no longer claims the AI client is v2-only; it now records the NetEase + AI invariants.
+### Phase 2A: Renderer Architecture Refactor
+- Split monolithic `LyricsEditorPanel.tsx` into 7 hooks + ~18 components
+- New hooks: `useEditorState`, `useDraftPersistence`, `useLyricsSearch`, `useAiGeneration`, `useSidebarState`, `useMenuSync`, `useVirtualTracks`
+- New components: `TopBar`, `LibrarySidebar`, `TrackTable`, `RightPanel` (TrackHeader, TabBar, ContextualToolbar, LyricsTab, TextTab, FindTab, LayerTabs), `AudioPreviewPlayer`, `Popover`, `AiLayerButton`
+- Removed: `EditorLayout` type, `LyricsEditorPanel.tsx`, global `autoSaveState`, local `sidebarVisible`
+- Type updates: `WorkspaceMode` (`lyrics|text|find`), added `LyricsProviderFilter`, `AiJobState`, `TrackEmbedStatus`
 
-## Verification Status (Linux workspace)
+### Phase 2B: Playwright E2E Suite (26/26 passing)
+- Created `tests/e2e/` with Playwright + mock HTTP servers (LRCLIB, NetEase)
+- 7 data-safety tests: layer isolation, idempotent embed, batch embed (non-focused tracks), playback embed (no seek replay), zero console errors, focus without crash, no draft on focus
+- 18 layout screenshot tests across 3 viewports (1366x690, 1120x700, 840x690): empty states, Lyrics/Text/Find tabs, narrow overflow checks
+- Fixture audio: `.flac`, `.opus`, `.m4a`, `.mp3`, `.wav` + `.lrc` (real tracked files from `tests/fixtures/`)
+- Hardened Test 5 (batch embed): verifies both tracks retain stacked primary+translation after embed
+- Hardened Test 6 (playback embed): records `timeBeforeEmbed`>=4.0s, samples `audio.currentTime` across embed, asserts no jump to ~1.0s seek target
+- Removed invalid `description` keys from `getByRole()`; fixed strict mode with `.first()`
+
+## Verification Status (Windows workspace)
 - `npm run typecheck`: PASS (0 errors, node + web)
-- `npm test`: PASS (364 passed, 4 platform-skipped, 368 total, 20 files)
+- `npm run lint`: PASS (0 errors, 11 pre-existing `react-hooks/exhaustive-deps` warnings)
+- `npm test`: PASS (430/430 tests, 23 files)
 - `npm run build`: PASS
-- NOT run here on purpose: `npm run build:unpack`, `dist:win`, packaged `--smoke-test` (Windows-only; no Electron binary in this container).
+- `npm run build:unpack`: PASS
+- `& ".\release\win-unpacked\Poweramp LRC Embedder.exe" --smoke-test`: PASS (`ready: true`)
+- `npm run test:e2e`: PASS (26/26 tests)
 
-## Exact Next Step
-1. On Windows: `npm ci` → `npm run build:unpack` → `.\release\win-unpacked\"Poweramp LRC Embedder.exe" --smoke-test`; confirm exit 0, `ready: true`, `2.5.1 (TagLib 2.3.2)`.
-2. `npm run dev` walkthrough: open `Ctrl+,` and confirm the key saves with a `Saved securely` badge and never reappears in plaintext; point at `http://localhost:11434/v1` with Ollama and confirm AI Translate fills only the Translation column while the primary is untouched; run Find on a J-pop/C-pop track and confirm NetEase `+T`/`+R` badges, provider pills, and `Load All Layers`; confirm `http://` remote URLs are rejected in Settings.
-3. Poweramp Android hardware spot-check across `.flac`, `.opus`, `.m4a`, `.mp3`, `.wav` + `.lrc`, including a stacked NetEase translation embed.
+## Next Step (Optional)
+- Manual glance at `tests/e2e/screenshots/` (22 PNGs across all viewports/tabs)
+- Merge `fix/editor-state-and-ui` into `main`
+- Optional future cleanup: 11 pre-existing `react-hooks/exhaustive-deps` lint warnings
 
-## Constraints / Open Blockers
-- Physical Android device with Poweramp required for the hardware spot-check.
-- No Electron binary/Xvfb here, so the renderer was validated by `tsc`, `vitest`, and the Vite production build only.
-- No live NetEase or chat-endpoint calls were made from this container; both clients are covered by injected-`fetch` unit tests.
+## Constraints
+- No changes to `src/` or `tests/` after this commit
+- Do not force-push `main`

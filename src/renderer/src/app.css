@@ -1,6 +1,10 @@
 @import 'tailwindcss' source(none);
-@source "../index.html";
-@source "./**/*.{ts,tsx}";
+@source '../index.html';
+@source './App.tsx';
+@source './main.tsx';
+@source './components/**/*.tsx';
+@source './components/**/*.ts';
+@source './hooks/**/*.ts';
 
 /* Match the dark theme for native form controls, scrollbars, and autofill. */
 :root {

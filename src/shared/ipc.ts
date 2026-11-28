@@ -20,6 +20,12 @@ import type {
   TrackRecord
 } from './types'
 
+export type {
+  AiJobState,
+  LyricsProviderFilter,
+  TrackEmbedStatus
+} from './types'
+
 export {
   MENU_ACTIONS,
   SUPPORTED_AUDIO_EXTENSIONS,
@@ -32,7 +38,6 @@ export {
   type AiProviderSettingsInput,
   type AiProviderSettingsPublic,
   type DraftStatus,
-  type EditorLayout,
   type MenuAction,
   type MenuSyncState,
   type WorkspaceMode,
