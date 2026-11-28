@@ -43,6 +43,9 @@ export async function startMockServer(): Promise<MockServer> {
       const chunks: Buffer[] = []
       req.on('data', (chunk) => chunks.push(chunk))
       req.on('end', () => {
+        const body = Buffer.concat(chunks).toString()
+        console.error(`[MOCK] ${req.method} ${req.url}`)
+        if (body) console.error(`[MOCK] Body: ${body}`)
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({}))
       })
@@ -97,8 +100,10 @@ export function registerHandler(
       const url = new URL(req.url ?? '', `http://localhost`)
       const pathHandler = mockServer.handlers?.get(url.pathname)
       if (pathHandler) {
+        console.error(`[MOCK HANDLER] ${req.method} ${url.pathname} ${url.search}`)
         pathHandler(req, res)
       } else {
+        console.error(`[MOCK 404] ${req.method} ${url.pathname} ${url.search}`)
         res.writeHead(404)
         res.end()
       }
@@ -314,6 +319,7 @@ async function generateWavFile(outputPath: string, durationSeconds: number): Pro
 
 /**
  * Creates a temporary media directory with fixture audio files.
+ * Copies real tracked files from tests/fixtures/ for proper embedded tag writes.
  */
 async function createMediaFixtures(tempDir: string): Promise<{
   shortWav: string
@@ -322,19 +328,28 @@ async function createMediaFixtures(tempDir: string): Promise<{
 }> {
   const trackFiles: string[] = []
 
-  // Generate a specific test track with known name FIRST so it's the first track in the library
-  // This ensures tests can reliably reference "Test Track - Test Artist"
-  const testTrackPath = path.join(tempDir, 'Test Track - Test Artist.flac')
-  await generateFlacFile(testTrackPath)
-  trackFiles.push(testTrackPath)
-
-  // Generate a second test track for multi-track tests
-  const testTrack2Path = path.join(tempDir, 'Another Track - Another Artist.flac')
-  await generateFlacFile(testTrack2Path)
-  trackFiles.push(testTrack2Path)
-
-  // Copy real audio fixtures (the larger test files)
+  // Copy real tracked files from tests/fixtures/ as the primary test tracks
+  // This ensures taglib-wasm performs real embedded tag writes on valid audio formats
   const fixturesDir = path.join(__dirname, '../../fixtures')
+  const primaryTracks = [
+    { src: 'sample.flac', dest: 'Test Artist - Test Track.flac' },
+    { src: 'sample.flac', dest: 'Another Artist - Another Track.flac' },
+    { src: 'sample.mp3', dest: 'Test Artist - Test Track.mp3' },
+    { src: 'sample.m4a', dest: 'Another Artist - Another Track.m4a' },
+  ]
+
+  for (const track of primaryTracks) {
+    const src = path.join(fixturesDir, track.src)
+    const dest = path.join(tempDir, track.dest)
+    try {
+      await copyFile(src, dest)
+      trackFiles.push(dest)
+    } catch (e) {
+      console.warn(`Could not copy fixture ${track.src} as ${track.dest}:`, e)
+    }
+  }
+
+  // Copy remaining real audio fixtures (larger test files)
   const fixtureFiles = [
     'Goindhamma - Meesaya Murukku 2.opus',
     'I Wanna Be Yours - AM.m4a',
@@ -355,63 +370,32 @@ async function createMediaFixtures(tempDir: string): Promise<{
     }
   }
 
-  // Generate small sample files for each format (since sample.* files don't exist in fixtures)
-  const sampleFormats = [
-    { name: 'sample.flac', generate: () => generateFlacFile(path.join(tempDir, 'sample.flac')) },
-    { name: 'sample.mp3', generate: () => generateMp3File(path.join(tempDir, 'sample.mp3')) },
-    { name: 'sample.m4a', generate: () => generateM4aFile(path.join(tempDir, 'sample.m4a')) },
-    { name: 'sample.opus', generate: () => generateOpusFile(path.join(tempDir, 'sample.opus')) },
-    { name: 'sample.wav', generate: () => generateWavFile(path.join(tempDir, 'sample.wav'), 2) }
-  ]
-
-  for (const format of sampleFormats) {
+  // Copy sample format files from tests/fixtures/ (real small files)
+  const sampleFiles = ['sample.flac', 'sample.mp3', 'sample.m4a', 'sample.opus', 'sample.wav']
+  for (const sample of sampleFiles) {
+    const src = path.join(fixturesDir, sample)
+    const dest = path.join(tempDir, sample)
     try {
-      await format.generate()
-      trackFiles.push(path.join(tempDir, format.name))
+      await copyFile(src, dest)
+      trackFiles.push(dest)
     } catch (e) {
-      console.warn(`Could not generate sample ${format.name}:`, e)
+      console.warn(`Could not copy sample ${sample}:`, e)
     }
   }
 
-  // Generate a long WAV with timed lyrics for seek/playback tests
-  const longWav = path.join(tempDir, 'long-test.wav')
-  await generateWavFileWithLyrics(longWav, 15)
+  // Generate a 15s WAV with timed lyrics for seek/playback tests (Test 6)
+  const playbackTrackPath = path.join(tempDir, 'Playback Artist - Playback Track.wav')
+  await generateWavFileWithLyrics(playbackTrackPath, 15)
+  trackFiles.push(playbackTrackPath)
 
   // Generate a short WAV for quick tests
   const shortWav = path.join(tempDir, 'short.wav')
   await generateWavFile(shortWav, 2)
 
+  // The long WAV is the playback track
+  const longWav = playbackTrackPath
+
   return { shortWav, longWav, trackFiles }
-}
-
-/**
- * Generates a minimal FLAC file (actually a WAV with .flac extension for testing).
- * Note: Real FLAC encoding requires native libs, so we generate a WAV file with .flac extension.
- */
-async function generateFlacFile(outputPath: string): Promise<string> {
-  // Generate a simple WAV but save with .flac extension for format detection testing
-  return generateWavFile(outputPath, 2)
-}
-
-/**
- * Generates a minimal MP3 file (actually a WAV with .mp3 extension for testing).
- */
-async function generateMp3File(outputPath: string): Promise<string> {
-  return generateWavFile(outputPath, 2)
-}
-
-/**
- * Generates a minimal M4A file (actually a WAV with .m4a extension for testing).
- */
-async function generateM4aFile(outputPath: string): Promise<string> {
-  return generateWavFile(outputPath, 2)
-}
-
-/**
- * Generates a minimal Opus file (actually a WAV with .opus extension for testing).
- */
-async function generateOpusFile(outputPath: string): Promise<string> {
-  return generateWavFile(outputPath, 2)
 }
 
 /**
@@ -523,9 +507,10 @@ async function createLibraryIndex(mediaDir: string, trackFiles: string[]): Promi
 
 /**
  * Computes a deterministic track ID from file path.
+ * Matches src/main/utils/trackId.ts: 32-char lowercase hex (full SHA-256).
  */
 function computeTrackId(filePath: string): string {
-  return createHash('sha256').update(path.resolve(filePath).toLowerCase()).digest('hex').slice(0, 16)
+  return createHash('sha256').update(path.resolve(filePath).toLowerCase()).digest('hex').slice(0, 32)
 }
 
 /**

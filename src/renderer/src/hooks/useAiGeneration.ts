@@ -48,14 +48,13 @@ export function useAiGeneration({
         return
       }
 
-      setBannerError('')
+      setBannerError(null)
       const jobId = `ai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
       aiJobIdRef.current = jobId
       setAiJob({ mode, jobId })
       setStatusMessage(mode === 'translation' ? 'AI translating…' : 'AI romanizing…')
 
       try {
-        // @ts-ignore
         const result = await window.api.aiGenerateLyrics({
           jobId,
           trackId: track.id,
@@ -97,7 +96,6 @@ export function useAiGeneration({
     const jobId = aiJobIdRef.current
     if (!jobId) return
     try {
-      // @ts-ignore
       await window.api.aiCancelGenerate(jobId)
     } catch {
       // Cancellation is best-effort

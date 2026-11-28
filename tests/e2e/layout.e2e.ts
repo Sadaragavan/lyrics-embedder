@@ -83,9 +83,14 @@ test.describe('Layout Screenshots', () => {
         skipInitialScan: false
       })
 
+      // The test focuses the first track ("Test Track - Test Artist") and searches
+      // Mock should return empty results for the actual track name that will be searched
       setupLrclibMock(lrclib, {
         search: [{
-          query: { track_name: 'Nonexistent', artist_name: 'Nobody' },
+          query: { track_name: 'Test Track', artist_name: 'Test Artist' },
+          response: []
+        }, {
+          query: { q: 'Test Artist Test Track' },
           response: []
         }]
       })
@@ -292,7 +297,8 @@ test.describe('Layout Screenshots', () => {
         // Load all layers from NetEase mock
         await page.getByRole('button', { name: 'Find', description: 'Find (Ctrl+3)' }).click()
         await page.waitForTimeout(500)
-        await page.getByRole('button', { name: 'NetEase' }).click()
+        // NetEase provider filter button has title "Search only NetEase"
+        await page.getByRole('button', { name: 'NetEase', exact: true, description: 'Search only NetEase' }).click()
         await page.getByRole('button', { name: 'Search' }).click()
         // Candidate rows have title attribute with "Track — Artist (Album)"
         await page.waitForSelector('button[title*="Test Track"]', { timeout: 15000 })

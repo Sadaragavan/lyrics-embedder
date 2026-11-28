@@ -78,7 +78,6 @@ export function useLyricsSearch({
         Number.isFinite(parsedDuration) && parsedDuration > 0
           ? parsedDuration
           : focusedTrack.durationSec
-      // @ts-ignore
       const results = await window.api.searchLyricsCandidates({
         trackId: focusedTrack.id,
         title: focusedTrack.title,
@@ -105,13 +104,12 @@ export function useLyricsSearch({
   }, [focusedTrack, searchDuration, searchTitle, searchArtist, searchAlbum, providerFilter, searchLoading])
 
   const applyFetchedCandidate = useCallback(
-    async (trackId: string, candidate: any): Promise<boolean> => {
+    async (trackId: string, candidate: LyricsSearchResult): Promise<boolean> => {
       const text = candidate.syncedLyrics ?? candidate.plainLyrics ?? ''
       if (!text) return false
       const translation = candidate.translatedLyrics ?? ''
       const romanization = candidate.romanizedLyrics ?? ''
       try {
-        // @ts-ignore
         const draft = await window.api.saveDraft({
           trackId,
           lyrics: text,
@@ -121,17 +119,15 @@ export function useLyricsSearch({
         })
         setEditorStates((prev) => {
           const next = new Map(prev)
-          const track = tracksRef.current.find((t) => t.id === trackId)
-          const baseState = track?.lyrics
-            ? { primary: track.lyrics, translation: { text: '', visible: true }, romanization: { text: '', visible: true }, dirty: true, saveState: 'idle' as const, trackId }
-            : { primary: '', translation: { text: '', visible: true }, romanization: { text: '', visible: true }, dirty: true, saveState: 'idle' as const, trackId }
+          const existingState = next.get(trackId)
+          const baseState = existingState ?? { primary: '', translation: { text: '', visible: true }, romanization: { text: '', visible: true }, dirty: true, saveState: 'idle' as const, trackId }
+          // Preserve existing translation/romanization if candidate doesn't supply new ones
+          const nextTranslation = translation.trim().length > 0 ? translation : baseState.translation.text
+          const nextRomanization = romanization.trim().length > 0 ? romanization : baseState.romanization.text
           const loaded = { ...baseState, primary: text }
-          const withTranslation = translation.trim() ? { ...loaded, translation: { ...loaded.translation, text: translation } } : loaded
-          const withRomanization = romanization.trim() ? { ...withTranslation, romanization: { ...withTranslation.romanization, text: romanization } } : withTranslation
-          const withVis = romanization.trim()
-            ? { ...withRomanization, translation: { ...withRomanization.translation, visible: translation.trim().length > 0 }, romanization: { ...withRomanization.romanization, visible: true } }
-            : { ...withRomanization, translation: { ...withRomanization.translation, visible: translation.trim().length > 0 } }
-          next.set(trackId, { ...withVis, saveState: 'saved' as const, dirty: false })
+          const withTranslation = { ...loaded, translation: { ...loaded.translation, text: nextTranslation, visible: nextTranslation.length > 0 } }
+          const withRomanization = { ...withTranslation, romanization: { ...loaded.romanization, text: nextRomanization, visible: nextRomanization.length > 0 } }
+          next.set(trackId, { ...withRomanization, saveState: 'saved' as const, dirty: false })
           return next
         })
         setTracks((prev) =>
@@ -151,7 +147,7 @@ export function useLyricsSearch({
       if (!focusedTrack) return
       const text = result.syncedLyrics ?? result.plainLyrics ?? ''
       if (!text) return
-      setBannerError('')
+      setBannerError(null)
       const applied = await applyFetchedCandidate(focusedTrack.id, result)
       if (applied) {
         await flushAutoSave(focusedTrack.id)
@@ -169,11 +165,10 @@ export function useLyricsSearch({
       if (!focusedTrack) return
       const text = result.syncedLyrics ?? result.plainLyrics ?? ''
       if (!text) return
-      setBannerError('')
+      setBannerError(null)
       try {
         const translation = result.translatedLyrics ?? ''
         const romanization = result.romanizedLyrics ?? ''
-        // @ts-ignore
         const draft = await window.api.saveDraft({
           trackId: focusedTrack.id,
           lyrics: text,

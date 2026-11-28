@@ -66,8 +66,7 @@ export function useMenuSync({
   ])
 
   useEffect(() => {
-    // @ts-ignore
-    void window.api.syncMenuState(menuSyncState)
+    window.api.syncMenuState(menuSyncState)
   }, [menuSyncState])
 
   return { handleMenuActionRef, menuSyncState }

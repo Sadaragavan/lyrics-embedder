@@ -43,7 +43,6 @@ export function useDraftPersistence({
       })
 
       try {
-        // @ts-ignore - window.api is available at runtime
         const draft = await window.api.saveDraft({
           trackId,
           lyrics: payload.lyrics,
@@ -102,11 +101,9 @@ export function useDraftPersistence({
   // Revert to embedded lyrics
   const handleRevertToEmbedded = useCallback(
     async (trackId: string) => {
-      setBannerError('')
+      setBannerError(null)
       try {
-        // @ts-ignore
         await window.api.deleteDraft(trackId)
-        // @ts-ignore
         const state = editorStatesRef.current.get(trackId)
         const original = state?.primary ?? ''
         setEditorStates((prev) => {
