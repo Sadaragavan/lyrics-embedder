@@ -31,10 +31,10 @@ test('focus track without crash', async () => {
     // Track title is in an h2 with classes truncate text-sm font-semibold
     await expect(page.locator('h2.truncate.text-sm.font-semibold').first()).toBeVisible({ timeout: 10000 })
 
-    // Tabs should be present - use description to disambiguate
-    await expect(page.getByRole('button', { name: 'Lyrics', description: 'Lyrics (Ctrl+1)' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Text', description: 'Text (Ctrl+2)' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Find', description: 'Find (Ctrl+3)' })).toBeVisible()
+    // Tabs should be present - use first match (tab bar buttons)
+    await expect(page.getByRole('button', { name: 'Lyrics' }).first()).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Text' }).first()).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Find' }).first()).toBeVisible()
   } finally {
     await cleanup()
   }
@@ -132,8 +132,8 @@ test('layer isolation across track switch', async () => {
     await trackA.click()
     await expect(page.locator('h2.truncate.text-sm.font-semibold').first()).toBeVisible({ timeout: 10000 })
 
-    // Go to Find tab and search NetEase
-    await page.getByRole('button', { name: 'Find', description: 'Find (Ctrl+3)' }).click()
+    // Go to Find tab and search NetEase - use first match (tab bar button)
+    await page.getByRole('button', { name: 'Find' }).first().click()
     await page.waitForTimeout(500)
     // Click NetEase provider filter
     await page.getByRole('button', { name: 'NetEase' }).click()
@@ -171,8 +171,8 @@ test('layer isolation across track switch', async () => {
     // Load all layers (primary + translation + romanization)
     await page.getByRole('button', { name: 'Load All Layers' }).click()
 
-    // Go to Text tab to verify layers loaded
-    await page.getByRole('button', { name: 'Text', description: 'Text (Ctrl+2)' }).click()
+    // Go to Text tab to verify layers loaded - use first match (tab bar button)
+    await page.getByRole('button', { name: 'Text' }).first().click()
     await page.waitForTimeout(500)
 
     // Verify Track A has translation
@@ -273,8 +273,8 @@ test('embed twice yields identical lyrics', async () => {
     await trackRow.click()
     await expect(page.locator('h2.truncate.text-sm.font-semibold').first()).toBeVisible({ timeout: 10000 })
 
-    // Click Find tab and search
-    await page.getByRole('button', { name: 'Find', description: 'Find (Ctrl+3)' }).click()
+    // Click Find tab and search - use first match (tab bar button)
+    await page.getByRole('button', { name: 'Find' }).first().click()
     await page.waitForTimeout(500)
     await page.getByRole('button', { name: 'Search' }).click()
 
@@ -287,8 +287,8 @@ test('embed twice yields identical lyrics', async () => {
     // Now "Load Primary" button should be visible - it's a native <button> with exact text
     await page.getByRole('button', { name: 'Load Primary' }).click()
 
-    // Go back to Lyrics tab
-    await page.getByRole('button', { name: 'Lyrics', description: 'Lyrics (Ctrl+1)' }).click()
+    // Go back to Lyrics tab - use first match (tab bar button)
+    await page.getByRole('button', { name: 'Lyrics' }).first().click()
     // Check the primary lyrics input value
     await expect(page.locator('input[aria-label*="Primary"][aria-label*="line"]').first()).toHaveValue(/Original lyric/, { timeout: 10000 })
 
@@ -296,8 +296,8 @@ test('embed twice yields identical lyrics', async () => {
     await page.getByRole('button', { name: /Embed/ }).first().click()
     await expect(page.locator('text=Embedded lyrics for "Test Track"')).toBeVisible({ timeout: 15000 })
 
-    // Go to Text tab to read full primary lyrics
-    await page.getByRole('button', { name: 'Text', description: 'Text (Ctrl+2)' }).click()
+    // Go to Text tab to read full primary lyrics - use first match (tab bar button)
+    await page.getByRole('button', { name: 'Text' }).first().click()
     await page.waitForTimeout(500)
 
     // Get the embedded lyrics from Text tab primary editor
@@ -376,7 +376,7 @@ test('batch embed preserves non-focused track layers', async () => {
     // Focus Track A (Test Artist - Test Track) and add primary + translation
     const trackA = trackRows.nth(0)
     await trackA.click()
-    await page.getByRole('button', { name: 'Text', description: 'Text (Ctrl+2)' }).click()
+    await page.getByRole('button', { name: 'Text' }).first().click()
 
     // Fill primary layer
     const primaryInputA = page.locator('textarea[aria-label="Primary layer LRC editor"]').first()
@@ -430,7 +430,7 @@ test('batch embed preserves non-focused track layers', async () => {
     // After embed, layers should be stacked into primary (translation cleared, as per design)
     await trackB.click()
     await page.waitForTimeout(500)
-    await page.getByRole('button', { name: 'Text', description: 'Text (Ctrl+2)' }).click()
+    await page.getByRole('button', { name: 'Text' }).first().click()
     await page.waitForTimeout(500)
 
     // Debug: log the actual values
@@ -447,7 +447,7 @@ test('batch embed preserves non-focused track layers', async () => {
     // Switch back to Track A and verify the same behavior
     await trackA.click()
     await page.waitForTimeout(500)
-    await page.getByRole('button', { name: 'Text', description: 'Text (Ctrl+2)' }).click()
+    await page.getByRole('button', { name: 'Text' }).first().click()
     await page.waitForTimeout(500)
 
     const primaryAfterEmbedA = await page.locator('textarea[aria-label="Primary layer LRC editor"]').first().inputValue()
@@ -541,8 +541,8 @@ test('embed during playback unloads audio and completes cleanly', async () => {
     await trackRow.click()
     await expect(page.locator('h2.truncate.text-sm.font-semibold').first()).toBeVisible({ timeout: 10000 })
 
-    // Click Find tab and search to load lyrics
-    await page.getByRole('button', { name: 'Find', description: 'Find (Ctrl+3)' }).click()
+    // Click Find tab and search to load lyrics - use first match (tab bar button)
+    await page.getByRole('button', { name: 'Find' }).first().click()
     await page.waitForTimeout(500)
     await page.getByRole('button', { name: 'Search' }).click()
 
@@ -553,8 +553,8 @@ test('embed during playback unloads audio and completes cleanly', async () => {
     await page.waitForTimeout(500)
     await page.getByRole('button', { name: 'Load Primary' }).click()
 
-    // Go to Lyrics tab to load lyrics in player
-    await page.getByRole('button', { name: 'Lyrics', description: 'Lyrics (Ctrl+1)' }).click()
+    // Go to Lyrics tab to load lyrics in player - use first match (tab bar button)
+    await page.getByRole('button', { name: 'Lyrics' }).first().click()
     await page.waitForTimeout(1000)
 
     // Wait for lyrics to load in player - check for active lyric lines
@@ -579,12 +579,28 @@ test('embed during playback unloads audio and completes cleanly', async () => {
     // Wait for playback to advance past 4.0s
     await expect.poll(audioCurrentTime, { timeout: 10000, intervals: [500] }).toBeGreaterThan(4.0)
 
+    // Record timeBeforeEmbed (must be >= 4.0)
+    const timeBeforeEmbed = await audioCurrentTime()
+    expect(timeBeforeEmbed).toBeGreaterThanOrEqual(4.0)
+
     // Trigger Embed - this will unload audio first (Windows file lock safety)
     await page.getByRole('button', { name: /Embed/ }).first().click()
     await expect(page.locator('text=Embedded lyrics for "Playback Track"')).toBeVisible({ timeout: 15000 })
 
-    // Wait for embed to complete and UI to settle
+    // Wait for embed to complete and UI to settle (1000ms settle time)
     await page.waitForTimeout(1000)
+
+    // Record timeAfterEmbed and assert playback did NOT jump back to the [00:01.00] seek (~1.0s)
+    // If the app unloads/reloads audio cleanly, position should be preserved (or at least not jump to 1.0)
+    // After embed on Windows, audio is unloaded - so currentTime may reset to 0. That's acceptable.
+    // What we MUST NOT see is a seek back to ~1.0s (the clicked timestamp) due to replaying the seek.
+    const timeAfterEmbed = await audioCurrentTime()
+    // If audio was unloaded (Windows file lock safety), currentTime will be 0.
+    // If position was preserved, it should be >= 3.5 (near where we were).
+    // The critical assertion: it must NOT be near 1.0 (the seek target we clicked).
+    expect(timeAfterEmbed).not.toBeCloseTo(1.0, 1) // Not near the [00:01.00] seek target
+    // Allow either: position preserved (>= 3.5) OR audio unloaded (0)
+    expect(timeAfterEmbed === 0 || timeAfterEmbed >= 3.5).toBeTruthy()
 
     // Verify embed completed without errors (audio will be unloaded for Windows file lock safety)
     await expect(page.locator('text=Embed failed')).not.toBeVisible({ timeout: 5000 })
@@ -626,10 +642,10 @@ test('zero console errors across suite', async () => {
     await trackRow.click()
     await expect(page.locator('h2.truncate.text-sm.font-semibold').first()).toBeVisible({ timeout: 10000 })
 
-    // Navigate through enabled tabs
-    await page.getByRole('button', { name: 'Lyrics', description: 'Lyrics (Ctrl+1)' }).click()
+    // Navigate through enabled tabs - use first match (tab bar buttons)
+    await page.getByRole('button', { name: 'Lyrics' }).first().click()
     await page.waitForTimeout(500)
-    await page.getByRole('button', { name: 'Lyrics', description: 'Lyrics (Ctrl+1)' }).click()
+    await page.getByRole('button', { name: 'Lyrics' }).first().click()
     await page.waitForTimeout(500)
 
     expect(consoleErrors).toEqual([])

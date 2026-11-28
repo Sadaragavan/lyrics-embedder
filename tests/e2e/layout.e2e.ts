@@ -104,8 +104,8 @@ test.describe('Layout Screenshots', () => {
         const trackRow = page.locator('[role="row"], .track-row, .track-item').first()
         await trackRow.click()
 
-        // Go to Find tab and search - use description to disambiguate
-        await page.getByRole('button', { name: 'Find', description: 'Find (Ctrl+3)' }).click()
+        // Go to Find tab and search - use first match (tab bar button)
+        await page.getByRole('button', { name: 'Find' }).first().click()
         await page.waitForTimeout(500)
         await page.getByRole('button', { name: 'Search' }).click()
 
@@ -145,8 +145,8 @@ test.describe('Layout Screenshots', () => {
         const trackRow = page.locator('[role="row"], .track-row, .track-item').first()
         await trackRow.click()
 
-        // Go to Find and trigger error - use description to disambiguate
-        await page.getByRole('button', { name: 'Find', description: 'Find (Ctrl+3)' }).click()
+        // Go to Find and trigger error - use first match (tab bar button)
+        await page.getByRole('button', { name: 'Find' }).first().click()
         await page.waitForTimeout(500)
         await page.getByRole('button', { name: 'Search' }).click()
 
@@ -220,7 +220,7 @@ test.describe('Layout Screenshots', () => {
         const trackRow = page.locator('[role="row"], .track-row, .track-item').first()
         await trackRow.click()
 
-        await page.getByRole('button', { name: 'Find', description: 'Find (Ctrl+3)' }).click()
+        await page.getByRole('button', { name: 'Find' }).first().click()
         await page.waitForTimeout(500)
         await page.getByRole('button', { name: 'Search' }).click()
         // Candidate rows have title attribute with "Track — Artist (Album)"
@@ -229,7 +229,7 @@ test.describe('Layout Screenshots', () => {
         await page.waitForTimeout(500)
         await page.getByRole('button', { name: 'Load Primary' }).click()
 
-        await page.getByRole('button', { name: 'Lyrics', description: 'Lyrics (Ctrl+1)' }).click()
+        await page.getByRole('button', { name: 'Lyrics' }).first().click()
         await page.waitForTimeout(1000)
 
         // Wait for active line highlight
@@ -290,15 +290,14 @@ test.describe('Layout Screenshots', () => {
         const trackRow = page.locator('[role="row"], .track-row, .track-item').first()
         await trackRow.click()
 
-        // Use description to disambiguate
-        await page.getByRole('button', { name: 'Text', description: 'Text (Ctrl+2)' }).click()
+        await page.getByRole('button', { name: 'Text' }).first().click()
         await page.waitForTimeout(1000)
 
         // Load all layers from NetEase mock
-        await page.getByRole('button', { name: 'Find', description: 'Find (Ctrl+3)' }).click()
+        await page.getByRole('button', { name: 'Find' }).first().click()
         await page.waitForTimeout(500)
         // NetEase provider filter button has title "Search only NetEase"
-        await page.getByRole('button', { name: 'NetEase', exact: true, description: 'Search only NetEase' }).click()
+        await page.getByRole('button', { name: 'NetEase', exact: true }).click()
         await page.getByRole('button', { name: 'Search' }).click()
         // Candidate rows have title attribute with "Track — Artist (Album)"
         await page.waitForSelector('button[title*="Test Track"]', { timeout: 15000 })
@@ -306,7 +305,7 @@ test.describe('Layout Screenshots', () => {
         await page.waitForTimeout(500)
         await page.getByRole('button', { name: 'Load All Layers' }).click()
 
-        await page.getByRole('button', { name: 'Text', description: 'Text (Ctrl+2)' }).click()
+        await page.getByRole('button', { name: 'Text' }).first().click()
         await page.waitForTimeout(1000)
 
         await page.screenshot({ path: `tests/e2e/screenshots/text-tab-wide-${viewport.width}x${viewport.height}.png`, fullPage: true })
@@ -353,7 +352,7 @@ test.describe('Layout Screenshots', () => {
         const trackRow = page.locator('[role="row"], .track-row, .track-item').first()
         await trackRow.click()
 
-        await page.getByRole('button', { name: 'Find', description: 'Find (Ctrl+3)' }).click()
+        await page.getByRole('button', { name: 'Find' }).first().click()
         await page.waitForTimeout(500)
         await page.getByRole('button', { name: 'Search' }).click()
         await page.waitForSelector('button[aria-pressed]', { timeout: 15000 })
@@ -395,7 +394,7 @@ test.describe('Layout Screenshots', () => {
       expect(scrollWidth).toBeLessThanOrEqual(clientWidth)
 
       // Check Text tab uses layer tabs (if Text tab is accessible)
-      await page.getByRole('button', { name: 'Text', description: 'Text (Ctrl+2)' }).click()
+      await page.getByRole('button', { name: 'Text' }).first().click()
       await page.waitForTimeout(500)
 
       // Check for layer tabs - they are buttons with labels "Primary", "Translation", "Romanization"
